@@ -55,8 +55,9 @@ void reachability_callback(SCNetworkReachabilityRef net_ref, SCNetworkReachabili
     (void) net_ref;
 
     if ((flags & FLG_DEBUG) != 0) {
-        printf("\n%s() host '%s': net_flags=%d, reach=%d\n",
+        fprintf(stdout, "\n%s() host '%s': net_flags=%d, reach=%d\n",
                 __func__, netlist_elt->host, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
+        fflush(stdout);
     }
     system("touch /etc/resolv.conf");
 }
@@ -81,6 +82,7 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
 
     fprintf(stdout, "%s v%s git#%s (GPL v3 - Copyright (c) 2018 Vincent Sallaberry)\n\n",
             BUILD_APPNAME, APP_VERSION, BUILD_GITREV);
+    fflush(stdout);
 
     for (int i_argv = 1; i_argv < argc; i_argv++) {
         if (argv[i_argv][0] == '-') {
@@ -135,18 +137,20 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
             if (!SCNetworkReachabilityScheduleWithRunLoop(cur->net_ref, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode)) {
                 fprintf(stderr, "error SCNetworkReachabilityScheduleWithRunLoop(%s)\n", cur->host);
             }
+            fprintf(stdout, "+ watching '%s'\n", cur->host);
         }
     }
 
     if ((flags & FLG_TEST) != 0) {
         timer = init_timer((void *) netlist);
         if (!timer)
-            printf("Create CFRunLoopTimer FAILED\n");
+            fprintf(stdout, "Create CFRunLoopTimer FAILED\n");
     }
 
     struct sigaction sa = { .sa_handler = sig_handler, .sa_flags = SA_RESTART };
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGINT, &sa, NULL) < 0) perror("sigaction");
+    fflush(stdout); fflush(stderr);
 
     CFRunLoopRun();
 
