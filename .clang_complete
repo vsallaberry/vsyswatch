@@ -1,0 +1,1 @@
+-I. -Iext/libvsensors/include -Iext/libvsensors/ext/vlib/include    -DHAVE_VERSION_H 
