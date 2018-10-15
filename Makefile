@@ -89,7 +89,7 @@ ARCH_RELEASE	= -march=native # -arch i386 -arch x86_64
 OPTI_COMMON	= -pipe -fstack-protector
 OPTI_RELEASE	= -O3 $(OPTI_COMMON)
 INCS_RELEASE	=
-LIBS_RELEASE	= $(SUBLIBS)
+LIBS_RELEASE	= $(SUBLIBS) -lpthread -ldl
 MACROS_RELEASE	=
 WARN_DEBUG	= $(WARN_RELEASE) # -Werror
 ARCH_DEBUG	= $(ARCH_RELEASE)
@@ -115,7 +115,7 @@ FLAGS_GCJ	=
 INCS_darwin	= $(FLAGS_GNUCXX_XTRA_$(UNAME_SYS)_$(CXX:++=pppp))
 LIBS_darwin	= -framework Foundation -framework IOKit -framework SystemConfiguration \
 		  $(LIBS_GNUCXX_XTRA_$(UNAME_SYS)_$(CXX:++=pppp))
-LIBS_linux	=
+LIBS_linux	= -lrt
 
 # TESTS and DEBUG parameters
 # VALGRIND_RUN_PROGRAM: how to run the program with valgrind (can be used to pass arguments to valgrind)

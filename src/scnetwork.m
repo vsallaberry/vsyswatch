@@ -21,6 +21,7 @@
  **   little utility for MacOS watching for availability of differents
  **   resources like network, battery, ...
  **/
+#import <CoreFoundation/CFRunLoop.h>
 #import <SystemConfiguration/SCNetwork.h>
 #import <SystemConfiguration/SCNetworkReachability.h>
 
@@ -28,15 +29,11 @@
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <sys/time.h>
+#include <fcntl.h>
 
 #include "version.h"
-
-enum {
-    FLG_NONE            = 0,
-    FLG_DEBUG           = 1 << 0,
-    FLG_TEST            = 1 << 1,
-    FLG_TRIG_ON_START   = 1 << 2,
-};
+#include "vsyswatch.h"
 
 typedef struct netlist_s {
     const char *                    host;
@@ -47,17 +44,23 @@ typedef struct netlist_s {
 } netlist_t;
 
 typedef struct {
-    unsigned int    flags;
-    netlist_t *     netlist;
-} scnetwork_ctx_t;
-
-typedef struct {
-    scnetwork_ctx_t *   ctx;
+    vsyswatch_ctx_t *   ctx;
     netlist_t *         netlist_elt;
 } reach_data_t;
 
 int is_reachable(SCNetworkReachabilityFlags net_flags) {
     return ((net_flags & kSCNetworkFlagsReachable) != 0);
+}
+
+int touch(const char * file) {
+    int fd = open(file, O_CREAT | O_WRONLY | O_APPEND, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
+    if (fd < 0) {
+        perror("open");
+        return fd;
+    }
+    int ret = futimes(fd, NULL);
+    close(fd);
+    return ret;
 }
 
 void reachability_callback(SCNetworkReachabilityRef net_ref, SCNetworkReachabilityFlags net_flags, void * data) {
@@ -75,9 +78,18 @@ void reachability_callback(SCNetworkReachabilityRef net_ref, SCNetworkReachabili
                         __func__, netlist_elt->host, status, net_flags);
                 fflush(stdout);
             }
-            system("touch /etc/resolv.conf");
+            touch(reachdata->ctx->network_watch_file);
         }
     }
+}
+
+void battery_callback(void * info, void * data) {
+    vsyswatch_ctx_t * ctx = (vsyswatch_ctx_t *) data;
+    if ((ctx->flags & FLG_DEBUG) != 0) {
+        fprintf(stdout, "%s(): info %lx\n", __func__, (unsigned long) info);
+        fflush(stdout);
+    }
+    touch(ctx->battery_watch_file);
 }
 
 void netlist_delete(netlist_t * netlist) {
@@ -93,7 +105,7 @@ void netlist_delete(netlist_t * netlist) {
     }
 }
 
-int netlist_addhost(const char * host, scnetwork_ctx_t * ctx) {
+int netlist_addhost(const char * host, vsyswatch_ctx_t * ctx) {
     netlist_t * new;
     if ((new = calloc(1, sizeof(netlist_t))) == NULL) {
         fprintf(stderr, "warning: cannot malloc for host '%s'\n", host);
@@ -122,8 +134,13 @@ static void sig_handler(int sig) {
     //[ CFRunLoopGetCurrent() stop];
 }
 
+int     vsyswatch_battery(vsyswatch_ctx_t * ctx, void(*)(void*,void*), void *);
+void    vsyswatch_battery_stop(vsyswatch_ctx_t * ctx);
+
 int main(int argc, const char *const* argv) { @autoreleasepool {
-    scnetwork_ctx_t             ctx = { .flags = FLG_NONE, .netlist = NULL };
+    vsyswatch_ctx_t             ctx = { .flags = FLG_NONE, .netlist = NULL, .battery = NULL,
+                                        .network_watch_file = "/tmp/vsyswatch_network",
+                                        .battery_watch_file = "/tmp/vsyswatch_battery" };
     CFRunLoopTimerRef           timer = NULL;
 
     fprintf(stdout, "%s v%s git#%s (GPL v3 - Copyright (c) 2018 Vincent Sallaberry)\n",
@@ -134,7 +151,7 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
         if (argv[i_argv][0] == '-') {
             for (const char * opt = argv[i_argv] + 1; *opt; opt++) {
                 switch (*opt) {
-                    case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-T] host1[ host2[...]]\n", *argv);
+                    case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-T] [host1[ host2[...]]]\n", *argv);
                               netlist_delete(ctx.netlist);
                               exit(0); break;
                     case 's': for (const char *const* s = vsyswatch_get_source(); s && *s; s++) {
@@ -153,11 +170,6 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
         } else {
             netlist_addhost(argv[i_argv], &ctx);
         }
-    }
-
-    if (ctx.netlist == NULL && (ctx.flags & FLG_TEST) == 0) {
-        fprintf(stderr, "error: no host given\n");
-        exit(2);
     }
 
     if ((ctx.flags & FLG_TEST) != 0) {
@@ -197,26 +209,28 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
             fprintf(stderr, "error: Create CFRunLoopTimer FAILED\n");
     }
 
+    vsyswatch_battery(&ctx, &battery_callback, &ctx);
+
     struct sigaction sa = { .sa_handler = sig_handler, .sa_flags = SA_RESTART };
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGINT, &sa, NULL) < 0) perror("sigaction(SIGINT)");
     if (sigaction(SIGTERM, &sa, NULL) < 0) perror("sigaction(SIGTERM)");
     fflush(stdout); fflush(stderr);
 
-    if (ctx.netlist)
-        CFRunLoopRun();
+    CFRunLoopRun();
 
     fprintf(stdout, "\nCFRunLoop FINISHED.\n");
     if (timer)
         CFRelease(timer);
     netlist_delete(ctx.netlist);
+    vsyswatch_battery_stop(&ctx);
     return 0;
 } /*!autoreleasepool*/ }
 
 static void timer_callback(CFRunLoopTimerRef timer, void * data) {
     (void)timer;
     SCNetworkConnectionFlags    net_flags;
-    scnetwork_ctx_t *           ctx = (scnetwork_ctx_t *) data;
+    vsyswatch_ctx_t *           ctx = (vsyswatch_ctx_t *) data;
     netlist_t *                 netlist = ctx->netlist;
     int                         newline = 0;
     char                        status;
