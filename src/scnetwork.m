@@ -54,12 +54,6 @@ typedef struct {
     netlist_t *         netlist_elt;
 } reach_data_t;
 
-void sig_handler(int sig) {
-    (void)sig;
-    CFRunLoopStop(CFRunLoopGetCurrent());
-    //[ CFRunLoopGetCurrent() stop];
-}
-
 int is_reachable(SCNetworkReachabilityFlags net_flags) {
     return ((net_flags & kSCNetworkFlagsReachable) != 0);
 }
@@ -84,11 +78,7 @@ void reachability_callback(SCNetworkReachabilityRef net_ref, SCNetworkReachabili
     }
 }
 
-CFRunLoopTimerRef   init_timer(CFRunLoopTimerContext * timer_context);
-void                timer_callback(CFRunLoopTimerRef timer, void * data);
-static void         test();
-
-static void delete_netlist(netlist_t * netlist) {
+void netlist_delete(netlist_t * netlist) {
     for (netlist_t * cur = netlist; cur; ) {
         netlist_t * to_delete = cur;
         cur = cur->next;
@@ -99,6 +89,35 @@ static void delete_netlist(netlist_t * netlist) {
         }
         free(to_delete);
     }
+}
+
+int netlist_addhost(const char * host, scnetwork_ctx_t * ctx) {
+    netlist_t * new;
+    if ((new = calloc(1, sizeof(netlist_t))) == NULL) {
+        fprintf(stderr, "warning: cannot malloc for host '%s'\n", host);
+        return 1;
+    }
+    new->status = -1;
+    new->next = ctx->netlist;
+    new->host = host;
+    reach_data_t * reachdata = malloc(sizeof(reach_data_t));
+    if (reachdata) {
+        reachdata->ctx = ctx;
+        reachdata->netlist_elt = new;
+    }
+    new->reachability_context.info = reachdata;
+    ctx->netlist = new;
+    return 0;
+}
+
+static CFRunLoopTimerRef    init_timer(CFRunLoopTimerContext * timer_context);
+static void                 timer_callback(CFRunLoopTimerRef timer, void * data);
+static int                  test();
+
+static void sig_handler(int sig) {
+    (void)sig;
+    CFRunLoopStop(CFRunLoopGetCurrent());
+    //[ CFRunLoopGetCurrent() stop];
 }
 
 int main(int argc, const char *const* argv) { @autoreleasepool {
@@ -114,41 +133,27 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
             for (const char * opt = argv[i_argv] + 1; *opt; opt++) {
                 switch (*opt) {
                     case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-T] host1[ host2[...]]\n", *argv);
-                              delete_netlist(ctx.netlist);
+                              netlist_delete(ctx.netlist);
                               exit(0); break;
                     case 's': for (const char *const* s = scnetwork_get_source(); s && *s; s++) {
                                   fprintf(stdout, "%s\n", *s);
                               }
-                              delete_netlist(ctx.netlist);
+                              netlist_delete(ctx.netlist);
                               exit(0); break ;
                     case 'x': ctx.flags |= FLG_TRIG_ON_START; break ;
                     case 'd': ctx.flags |= FLG_DEBUG; break ;
                     case 'T': ctx.flags |= FLG_TEST | FLG_DEBUG; break ;
                     default: fprintf(stderr, "error: wrong option %c\n", *opt);
-                             delete_netlist(ctx.netlist);
+                             netlist_delete(ctx.netlist);
                              exit(1); break ;
                 }
             }
         } else {
-            netlist_t * new;
-            if ((new = calloc(1, sizeof(netlist_t))) == NULL) {
-                fprintf(stderr, "warning: cannot malloc for host '%s'\n", argv[i_argv]);
-            } else {
-                new->status = -1;
-                new->next = ctx.netlist;
-                new->host = argv[i_argv];
-                reach_data_t * reachdata = malloc(sizeof(reach_data_t));
-                if (reachdata) {
-                    reachdata->ctx = &ctx;
-                    reachdata->netlist_elt = new;
-                }
-                new->reachability_context.info = reachdata;
-                ctx.netlist = new;
-            }
+            netlist_addhost(argv[i_argv], &ctx);
         }
     }
 
-    if (ctx.netlist == NULL) {
+    if (ctx.netlist == NULL && (ctx.flags & FLG_TEST) == 0) {
         fprintf(stderr, "error: no host given\n");
         exit(2);
     }
@@ -196,16 +201,17 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
     if (sigaction(SIGTERM, &sa, NULL) < 0) perror("sigaction(SIGTERM)");
     fflush(stdout); fflush(stderr);
 
-    CFRunLoopRun();
+    if (ctx.netlist)
+        CFRunLoopRun();
 
     fprintf(stdout, "\nCFRunLoop FINISHED.\n");
     if (timer)
         CFRelease(timer);
-    delete_netlist(ctx.netlist);
+    netlist_delete(ctx.netlist);
     return 0;
 } /*!autoreleasepool*/ }
 
-void timer_callback(CFRunLoopTimerRef timer, void * data) {
+static void timer_callback(CFRunLoopTimerRef timer, void * data) {
     (void)timer;
     SCNetworkConnectionFlags    net_flags;
     scnetwork_ctx_t *           ctx = (scnetwork_ctx_t *) data;
@@ -225,7 +231,7 @@ void timer_callback(CFRunLoopTimerRef timer, void * data) {
     fflush(stdout);
 }
 
-CFRunLoopTimerRef init_timer(CFRunLoopTimerContext * context) {
+static CFRunLoopTimerRef init_timer(CFRunLoopTimerContext * context) {
     CFRunLoopRef runLoop = CFRunLoopGetCurrent();
     CFRunLoopTimerRef timer = CFRunLoopTimerCreate(kCFAllocatorDefault, 0.1 /*firedate_s*/, 1 /*interval_s*/,
                                                    0, 0, &timer_callback, context);
@@ -233,58 +239,64 @@ CFRunLoopTimerRef init_timer(CFRunLoopTimerContext * context) {
     return timer;
 }
 
-static void test() {
+static int test() {
     SCNetworkReachabilityRef    net_ref;
     SCNetworkReachabilityFlags  net_flags;
-    Boolean ok;
+    Boolean                     ok;
+    const char *                host;
 
     //***
+    host = "localhost";
     net_flags = 0;
-    if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, "tiger"))) {
+    if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, host))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithName(host) ok=%d, net_flags=%d, reach=%d\n",
-               ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
+        printf("CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
+               host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     } else {
-        printf("CreateWithName(host) FAILED\n");
+        printf("CreateWithName(%s) FAILED\n", host);
     }
 
     //***
+    host = "github.com";
     net_flags = 0;
-    if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, "tiger.vbox.loc"))) {
+    if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, host))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithName(host.dom) ok=%d, net_flags=%d, reach=%d\n",
-               ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
+        printf("CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
+               host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     } else {
-        printf("CreateWithName(host.dom) FAILED\n");
+        printf("CreateWithName(%s) FAILED\n", host);
     }
 
     //***
+    host = "127.0.0.1";
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    inet_pton(addr.sin_family, "192.168.56.20", &addr.sin_addr);
+    inet_pton(addr.sin_family, host, &addr.sin_addr);
 
     net_flags = 0;
     if ((net_ref = SCNetworkReachabilityCreateWithAddress(NULL, (struct sockaddr *) &addr))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithAddress(ipv4) ok=%d, net_flags=%d, reach=%d\n",
-               ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
+        printf("CreateWithAddress(%s) ok=%d, net_flags=%d, reach=%d\n",
+               host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     } else {
-        printf("CreateWithAddress(ipv4) FAILED\n");
+        printf("CreateWithAddress(%s) FAILED\n", host);
     }
 
     //***
+    host = "192.168.0.1";
     net_flags = 0;
-    if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, "192.168.56.1"))) {
+    if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, host))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithName(ipv4) ok=%d, net_flags=%d, reach=%d\n",
-               ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
+        printf("CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
+               host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     }  else {
-        printf("CreateWithName(ipv4) FAILED\n");
+        printf("CreateWithName(%s) FAILED\n", host);
     }
+    return 0;
 }
 
