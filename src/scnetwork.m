@@ -31,6 +31,8 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 
 #include "version.h"
 #include "vsyswatch.h"
@@ -55,10 +57,13 @@ int is_reachable(SCNetworkReachabilityFlags net_flags) {
 int touch(const char * file) {
     int fd = open(file, O_CREAT | O_WRONLY | O_APPEND, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
     if (fd < 0) {
-        perror("open");
+        fprintf(stderr, "error, '%s', %s\n", file, strerror(errno));
         return fd;
     }
     int ret = futimes(fd, NULL);
+    if (ret < 0) {
+        fprintf(stderr, "error, '%s', %s\n", file, strerror(errno));
+    }
     close(fd);
     return ret;
 }
@@ -151,7 +156,8 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
         if (argv[i_argv][0] == '-') {
             for (const char * opt = argv[i_argv] + 1; *opt; opt++) {
                 switch (*opt) {
-                    case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-T] [host1[ host2[...]]]\n", *argv);
+                    case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-N netfile] [-B batfile]"
+                                              " [-T] [host1[ host2[...]]]\n", *argv);
                               netlist_delete(ctx.netlist);
                               exit(0); break;
                     case 's': for (const char *const* s = vsyswatch_get_source(); s && *s; s++) {
@@ -161,6 +167,18 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
                               exit(0); break ;
                     case 'x': ctx.flags |= FLG_TRIG_ON_START; break ;
                     case 'd': ctx.flags |= FLG_DEBUG; break ;
+                    case 'N': if (i_argv + 1 >= argc) {
+                                fprintf(stderr, "error: missing argument for -N\n");
+                                exit(2);
+                              }
+                              ctx.network_watch_file = argv[++i_argv];
+                              break ;
+                    case 'B': if (i_argv + 1 >= argc) {
+                                fprintf(stderr, "error: missing argument for -B\n");
+                                exit(3);
+                              }
+                              ctx.battery_watch_file = argv[++i_argv];
+                              break ;
                     case 'T': ctx.flags |= FLG_TEST | FLG_DEBUG; break ;
                     default: fprintf(stderr, "error: wrong option %c\n", *opt);
                              netlist_delete(ctx.netlist);
