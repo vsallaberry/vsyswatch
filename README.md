@@ -1,4 +1,4 @@
-## scnetwork
+## vsyswatch
 ---------------
 
 * [Overview](#overview)
@@ -6,11 +6,12 @@
 * [License](#license)
 
 ## Overview
-scnetwork: little utility watching for availability of network inferfaces.
+vsyswatch: little utility for MacOS watching for availability of differents
+resources like network, battery, ...
 
 ## Contact
 [vsallaberry@gmail.com]  
-<https://github.com/vsallaberry/scnetwork>
+<https://github.com/vsallaberry/vsyswatch>
 
 ## License
 GPLv3 or later. See LICENSE file.

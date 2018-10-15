@@ -1,6 +1,6 @@
 /*
  ** Copyright (C) 2018 Vincent Sallaberry
- ** scnetwork <https://github.com/vsallaberry/scnetwork>
+ ** vsyswatch <https://github.com/vsallaberry/vsyswatch>
  **
  ** This program is free software; you can redistribute it and/or modify
  ** it under the terms of the GNU General Public License as published by
@@ -17,7 +17,9 @@
  ** 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  **
  ** -------------------------------------------------------------------------
- ** scnetwork: little utility watching for availability of network inferfaces.
+ ** vsyswatch:
+ **   little utility for MacOS watching for availability of differents
+ **   resources like network, battery, ...
  **/
 #import <SystemConfiguration/SCNetwork.h>
 #import <SystemConfiguration/SCNetworkReachability.h>
@@ -135,7 +137,7 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
                     case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-T] host1[ host2[...]]\n", *argv);
                               netlist_delete(ctx.netlist);
                               exit(0); break;
-                    case 's': for (const char *const* s = scnetwork_get_source(); s && *s; s++) {
+                    case 's': for (const char *const* s = vsyswatch_get_source(); s && *s; s++) {
                                   fprintf(stdout, "%s\n", *s);
                               }
                               netlist_delete(ctx.netlist);

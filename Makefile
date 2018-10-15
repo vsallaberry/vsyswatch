@@ -1,6 +1,6 @@
 #
 # Copyright (C) 2017-2018 Vincent Sallaberry
-# scnetwork <https://github.com/vsallaberry/scnetwork>
+# vsyswatch <https://github.com/vsallaberry/vsyswatch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,7 +18,8 @@
 #
 ############################################################################################
 #
-# scnetwork: little utility watching for availability of network inferfaces.
+# vsyswatch: little utility for MacOS watching for availability of differents
+#            resources like network, battery, ...
 #
 # Generic Makefile for GNU-like or BSD-like make (paths with spaces not supported).
 #   demo of this Makefile with multiple languages: <https://github.com/vsallaberry/vmultilangdemo>
@@ -34,7 +35,7 @@ all: default_rule
 #############################################################################################
 
 # Name of the Package (DISTNAME, BIN and LIB depends on it)
-NAME		= scnetwork
+NAME		= vsyswatch
 
 # SRCDIR: Folder where sources are. Use '.' for current directory. MUST NEVER BE EMPTY !!
 # Folders which contains a Makefile are ignored, you have to add them in SUBDIRS and update SUBLIBS.
@@ -112,7 +113,8 @@ FLAGS_GCJ	=
 #FLAGS_GNUCXX_XTRA_darwin_/usr/bin/clangpppp=-stdlib=libstdc++
 #LIBS_GNUCXX_XTRA_darwin_/usr/bin/clangpppp=-stdlib=libstdc++
 INCS_darwin	= $(FLAGS_GNUCXX_XTRA_$(UNAME_SYS)_$(CXX:++=pppp))
-LIBS_darwin	= -framework Foundation -framework SystemConfiguration $(LIBS_GNUCXX_XTRA_$(UNAME_SYS)_$(CXX:++=pppp))
+LIBS_darwin	= -framework Foundation -framework IOKit -framework SystemConfiguration \
+		  $(LIBS_GNUCXX_XTRA_$(UNAME_SYS)_$(CXX:++=pppp))
 LIBS_linux	=
 
 # TESTS and DEBUG parameters
