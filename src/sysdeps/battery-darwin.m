@@ -33,26 +33,30 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <notify.h>
+#include <signal.h>
 #include <pthread.h>
 
 #include "vsyswatch.h"
 
+#define SIG_SPECIAL_VALUE   0
+#define SIG_KILL_THREAD     SIGUSR1
+
 typedef struct {
     pthread_t       tid;
-    int             notify_fd;
     void            (*callback)(void *, void *);
     void *          callback_data;
 } battery_data_t;
 
-static void * battery_notify(void * data);
+static void *           battery_notify(void * data);
+static pthread_mutex_t  mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void vsyswatch_battery_stop(vsyswatch_ctx_t * ctx) {
     if (ctx && ctx->battery) {
         battery_data_t * battery = (battery_data_t *) ctx->battery;
-        int fd = battery->notify_fd;
-        battery->notify_fd = -1;
-        close(fd);
+        pthread_mutex_lock(&mutex);
+        pthread_kill(battery->tid, SIG_KILL_THREAD);
         pthread_join(battery->tid, NULL);
+        pthread_mutex_unlock(&mutex);
         ctx->battery = NULL;
         free(battery);
     }
@@ -75,8 +79,6 @@ int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void
     }
     battery->callback = callback;
     battery->callback_data = callback_data;
-    battery->notify_fd = -1;
-
     return pthread_create(&battery->tid, NULL, battery_notify, ctx);
 }
 
@@ -96,9 +98,9 @@ static int verbose(vsyswatch_ctx_t * ctx, FILE * file, const char * fmt, ...) {
 
 enum { EV_NONE = 0, EV_AC = 1 << 0, EV_BAT_OK = 1 << 1, EV_BAT_LOW = 1 << 2 };
 
-int register_events(vsyswatch_ctx_t * ctx,
-                    int * nf, int * ev_power_source, int * ev_low_battery, int * ev_time_remaining,
-                    int battery_warning_level, CFTimeInterval time_remaining, int * state) {
+static int register_events(vsyswatch_ctx_t * ctx, int * state, int * nf,
+                           int * ev_power_source, int * ev_low_battery, int * ev_time_remaining,
+                           int battery_warning_level, CFTimeInterval time_remaining) {
 
     const struct { const char * ev; int * tok; int flags; } *cur_ev, evs[] = {
         { kIOPSNotifyPowerSource,   ev_power_source,   EV_AC },
@@ -143,6 +145,60 @@ int register_events(vsyswatch_ctx_t * ctx,
     return (*nf >= 0) ? 0 : -1;
 }
 
+
+static void sig_handler(int sig, siginfo_t * sig_info,  void * data) {
+    /* list of registered threads */
+    static struct threadlist_s {
+        pthread_t tid; volatile sig_atomic_t * running; struct threadlist_s * next;
+    } *         threadlist = NULL;
+    pthread_t   tself = pthread_self();
+
+    if (sig != SIG_SPECIAL_VALUE) {
+        if (sig_info && sig_info->si_pid == getpid()) {
+            /* looking for tid in threadlist and update running if found, then delete entry */
+            for (struct threadlist_s * prev = NULL, * cur = threadlist; cur; prev = cur, cur = cur->next) {
+                if (tself == cur->tid && cur->running) {
+                    *cur->running = 0;
+                    if (prev == NULL)
+                        threadlist = cur->next;
+                    else
+                        prev->next = cur->next;
+                    free(cur);
+                    break ;
+                }
+            }
+        }
+        return ;
+    }
+    /* following is not a signal */
+    sigset_t block, save;
+    sigaddset(&block, SIG_KILL_THREAD);
+    pthread_sigmask(SIG_BLOCK, &block, &save);
+    pthread_mutex_lock(&mutex);
+    /* special mode to delete threadlist, but if thread exited normally this should not be necessary */
+    if (sig == SIG_SPECIAL_VALUE && sig_info == NULL && data == NULL) {
+        for (struct threadlist_s * cur = threadlist; cur; ) {
+            struct threadlist_s * to_delete = cur;
+            cur = cur->next;
+            free(to_delete);
+        }
+        threadlist = NULL;
+    } else {
+        /* if this is reached we register the data as running ptr for pthread_self() */
+        struct threadlist_s * new = malloc(sizeof(struct threadlist_s));
+        if (new) {
+            new->tid = tself;
+            new->running = data;
+            new->next = threadlist;
+            threadlist = new;
+        } else {
+            fprintf(stderr, "%s(): malloc threadlist error: %s\n", __func__, strerror(errno));
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+    pthread_sigmask(SIG_SETMASK, &save, NULL);
+}
+
 static void * battery_notify(void * data) {
     vsyswatch_ctx_t *   ctx = (vsyswatch_ctx_t *) data;
     battery_data_t *    battery = (battery_data_t *) ctx->battery;
@@ -152,14 +208,28 @@ static void * battery_notify(void * data) {
     int                 t, ret;
     CFTimeInterval      time_remaining;
     int                 battery_warning_level;
+    struct sigaction    sa = { .sa_sigaction = sig_handler, .sa_flags = SA_SIGINFO };
+    volatile sig_atomic_t thread_running = 1;
+
+    /* call sig_handler to register this thread with thread_running ptr */
+    if (sigaction(SIG_SPECIAL_VALUE, &sa, NULL) == 0) {
+        fprintf(stderr, "%s(): error sigaction(%d) is accepted, "
+                        "choose another value for SIG_SPECIAL_VALUE\n", __func__, SIG_SPECIAL_VALUE);
+        return (void*) -1;
+    }
+    sig_handler(SIG_SPECIAL_VALUE, NULL, (void *) &thread_running);
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIG_KILL_THREAD, &sa, NULL) < 0) {
+        fprintf(stderr, "%s(): error sigaction(%d): %s\n", __func__, SIG_KILL_THREAD, strerror(errno));
+        return (void*) -1;
+    }
 
     time_remaining = IOPSGetTimeRemainingEstimate();
     battery_warning_level = IOPSGetBatteryWarningLevel();
-    if (register_events(ctx, &nf, &ev_power_source, &ev_low_battery, &ev_time_remaining,
-                        battery_warning_level, time_remaining, &state) != 0) {
+    if (register_events(ctx, &state, &nf, &ev_power_source, &ev_low_battery, &ev_time_remaining,
+                        battery_warning_level, time_remaining) != 0) {
         return (void *) -1;
     }
-    battery->notify_fd = nf;
 
     if ((ctx->flags & FLG_TRIG_ON_START) != 0 && battery->callback) {
         long l;
@@ -169,7 +239,7 @@ static void * battery_notify(void * data) {
         battery->callback((void*) l, battery->callback_data);
     }
 
-    while (1) {
+    while (thread_running) {
         FD_ZERO(&readfds);
         FD_ZERO(&errfds);
         FD_SET(nf, &readfds);
@@ -179,11 +249,11 @@ static void * battery_notify(void * data) {
             verbose(ctx, stderr, "%s(): notify select timeout\n", __func__);
             continue ;
         }
-        if (ret < 0 && errno == EINTR)
+        if (ret < 0 && errno == EINTR) {
             continue;
+        }
         if (ret < 0) {
-            if (battery->notify_fd >= 0)
-                fprintf(stderr, "%s(): notify select error: %s\n", __func__, strerror(errno));
+            fprintf(stderr, "%s(): notify select error: %s\n", __func__, strerror(errno));
             break ;
         }
         if (FD_ISSET(nf, &errfds) || !FD_ISSET(nf, &readfds)) {
@@ -265,8 +335,8 @@ static void * battery_notify(void * data) {
             fprintf(stderr, "battery: unknown EVENT (%d)\n", t);
         }
 
-        if (register_events(ctx, &nf, &ev_power_source, &ev_low_battery, &ev_time_remaining,
-                            battery_warning_level, time_remaining, &state) != 0) {
+        if (register_events(ctx, &state, &nf, &ev_power_source, &ev_low_battery, &ev_time_remaining,
+                            battery_warning_level, time_remaining) != 0) {
             break ;
         }
     }
@@ -274,7 +344,6 @@ static void * battery_notify(void * data) {
     notify_cancel(ev_low_battery);
     notify_cancel(ev_time_remaining);
     notify_cancel(ev_power_source);
-    battery->notify_fd = -1;
     close(nf);
     return (void*) 0;
 }
