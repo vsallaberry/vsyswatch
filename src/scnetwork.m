@@ -78,23 +78,37 @@ void reachability_callback(SCNetworkReachabilityRef net_ref, SCNetworkReachabili
         if (status != netlist_elt->status) {
             if ((reachdata->ctx->flags & FLG_TEST) == 0) // in test mode, timer_callback will update cur->status
                 netlist_elt->status = status;
-            if ((reachdata->ctx->flags & FLG_DEBUG) != 0) {
-                fprintf(stdout, "\n%s(): host '%s' reachable=%d net_flags=%d\n",
-                        __func__, netlist_elt->host, status, net_flags);
+            if ((reachdata->ctx->flags & FLG_PRINT_EVENT) != 0) {
+                fprintf(stdout, "%-10s | name: %s | reachable: %d | net_flags: %d\n",
+                        "HOST", netlist_elt->host, status, net_flags);
                 fflush(stdout);
             }
-            touch(reachdata->ctx->network_watch_file);
+            if (reachdata->ctx->network_watch_file)
+                touch(reachdata->ctx->network_watch_file);
         }
     }
 }
 
 void battery_callback(void * info, void * data) {
+    static const char * info_str[] = { "warning_none", "warning_early", "warning_final",
+                                       "timeremaining_unknown", "timeremaining_unlimited" };
     vsyswatch_ctx_t * ctx = (vsyswatch_ctx_t *) data;
-    if ((ctx->flags & FLG_DEBUG) != 0) {
-        fprintf(stdout, "%s(): info %lx\n", __func__, (unsigned long) info);
+    if ((ctx->flags & FLG_PRINT_EVENT) != 0) {
+        const char * str;
+        if ((long)info >= 0)
+            str = "time_remaining";
+        else {
+            unsigned long idx  = (-((long)info) - 1);
+            if (idx < sizeof(info_str) / sizeof(*info_str))
+                str = info_str[idx];
+            else
+                str = "unknown";
+        }
+        fprintf(stdout, "%-10s | info: %s | val: %ld\n", "BATTERY", str, (long) info);
         fflush(stdout);
     }
-    touch(ctx->battery_watch_file);
+    if (ctx->battery_watch_file)
+        touch(ctx->battery_watch_file);
 }
 
 void netlist_delete(netlist_t * netlist) {
@@ -143,20 +157,21 @@ int     vsyswatch_battery(vsyswatch_ctx_t * ctx, void(*)(void*,void*), void *);
 void    vsyswatch_battery_stop(vsyswatch_ctx_t * ctx);
 
 int main(int argc, const char *const* argv) { @autoreleasepool {
-    vsyswatch_ctx_t             ctx = { .flags = FLG_NONE, .netlist = NULL, .battery = NULL,
-                                        .network_watch_file = "/tmp/vsyswatch_network",
-                                        .battery_watch_file = "/tmp/vsyswatch_battery" };
+    vsyswatch_ctx_t             ctx = { .flags = FLG_NONE | FLG_PRINT_EVENT,
+                                        .netlist = NULL, .battery = NULL, .file = NULL,
+                                        .network_watch_file = NULL,
+                                        .battery_watch_file = NULL };
     CFRunLoopTimerRef           timer = NULL;
 
-    fprintf(stdout, "%s v%s git#%s (GPL v3 - Copyright (c) 2018 Vincent Sallaberry)\n",
+    fprintf(stderr, "%s v%s git#%s (GPL v3 - Copyright (c) 2018 Vincent Sallaberry)\n",
             BUILD_APPNAME, APP_VERSION, BUILD_GITREV);
-    fflush(stdout);
+    fflush(stderr);
 
     for (int i_argv = 1; i_argv < argc; i_argv++) {
         if (argv[i_argv][0] == '-') {
             for (const char * opt = argv[i_argv] + 1; *opt; opt++) {
                 switch (*opt) {
-                    case 'h': fprintf(stdout, "Usage: %s [-h] [-s] [-d] [-x] [-N netfile] [-B batfile]"
+                    case 'h': fprintf(stderr, "Usage: %s [-h] [-s] [-v] [-x] [-N netfile] [-B batfile]"
                                               " [-T] [host1[ host2[...]]]\n", *argv);
                               netlist_delete(ctx.netlist);
                               exit(0); break;
@@ -166,20 +181,22 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
                               netlist_delete(ctx.netlist);
                               exit(0); break ;
                     case 'x': ctx.flags |= FLG_TRIG_ON_START; break ;
-                    case 'd': ctx.flags |= FLG_DEBUG; break ;
+                    case 'v': ctx.flags |= FLG_VERBOSE; break ;
                     case 'N': if (i_argv + 1 >= argc) {
                                 fprintf(stderr, "error: missing argument for -N\n");
+                                netlist_delete(ctx.netlist);
                                 exit(2);
                               }
                               ctx.network_watch_file = argv[++i_argv];
                               break ;
                     case 'B': if (i_argv + 1 >= argc) {
                                 fprintf(stderr, "error: missing argument for -B\n");
+                                netlist_delete(ctx.netlist);
                                 exit(3);
                               }
                               ctx.battery_watch_file = argv[++i_argv];
                               break ;
-                    case 'T': ctx.flags |= FLG_TEST | FLG_DEBUG; break ;
+                    case 'T': ctx.flags |= FLG_TEST | FLG_VERBOSE; break ;
                     default: fprintf(stderr, "error: wrong option %c\n", *opt);
                              netlist_delete(ctx.netlist);
                              exit(1); break ;
@@ -204,12 +221,12 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
                     reachability_callback(cur->net_ref, net_flags, cur->reachability_context.info);
                 } else {
                     cur->status = is_reachable(net_flags);
-                    if ((ctx.flags & FLG_DEBUG) != 0) {
-                        fprintf(stdout, "+ watching '%s' (reachable=%d, net_flags=%d)\n", cur->host, cur->status, net_flags);
+                    if ((ctx.flags & FLG_VERBOSE) != 0) {
+                        fprintf(stderr, "+ watching '%s' (reachable=%d, net_flags=%d)\n", cur->host, cur->status, net_flags);
                     }
                 }
-            } else if ((ctx.flags & FLG_DEBUG) != 0) {
-                fprintf(stdout, "+ watching '%s' (SCNetworkReachabilityGetFlags FAILED)\n", cur->host);
+            } else if ((ctx.flags & FLG_VERBOSE) != 0) {
+                fprintf(stderr, "+ watching '%s' (SCNetworkReachabilityGetFlags FAILED)\n", cur->host);
             }
             if (!SCNetworkReachabilitySetCallback(cur->net_ref, &reachability_callback, &cur->reachability_context)) {
                 fprintf(stderr, "error SCNetworkReachabilitySetCallback(%s)\n", cur->host);
@@ -237,7 +254,8 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
 
     CFRunLoopRun();
 
-    fprintf(stdout, "\nCFRunLoop FINISHED.\n");
+    if ((ctx.flags & FLG_VERBOSE) != 0)
+        fprintf(stderr, "\nCFRunLoop FINISHED.\n");
     if (timer)
         CFRelease(timer);
     netlist_delete(ctx.netlist);
@@ -255,14 +273,14 @@ static void timer_callback(CFRunLoopTimerRef timer, void * data) {
     for (netlist_t * cur = netlist; cur; cur = cur->next) {
         if (cur->net_ref && SCNetworkReachabilityGetFlags(cur->net_ref, &net_flags)
         && (status = is_reachable(net_flags)) != cur->status) {
-            if (!newline) { putc('\n', stdout); newline = 1; }
+            if (!newline) { putc('\n', stderr); newline = 1; }
             cur->status = status;
-            printf("Timer: host '%s' reachability changed to %d\n", cur->host, cur->status);
+            fprintf(stderr, "Timer: host '%s' reachability changed to %d\n", cur->host, cur->status);
         }
     }
 
-    putc('.', stdout);
-    fflush(stdout);
+    putc('.', stderr);
+    fflush(stderr);
 }
 
 static CFRunLoopTimerRef init_timer(CFRunLoopTimerContext * context) {
@@ -284,11 +302,11 @@ static int test() {
     net_flags = 0;
     if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, host))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
+        fprintf(stderr, "CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
                host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     } else {
-        printf("CreateWithName(%s) FAILED\n", host);
+        fprintf(stderr, "CreateWithName(%s) FAILED\n", host);
     }
 
     //***
@@ -296,11 +314,11 @@ static int test() {
     net_flags = 0;
     if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, host))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
+        fprintf(stderr, "CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
                host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     } else {
-        printf("CreateWithName(%s) FAILED\n", host);
+        fprintf(stderr, "CreateWithName(%s) FAILED\n", host);
     }
 
     //***
@@ -313,11 +331,11 @@ static int test() {
     net_flags = 0;
     if ((net_ref = SCNetworkReachabilityCreateWithAddress(NULL, (struct sockaddr *) &addr))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithAddress(%s) ok=%d, net_flags=%d, reach=%d\n",
+        fprintf(stderr, "CreateWithAddress(%s) ok=%d, net_flags=%d, reach=%d\n",
                host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     } else {
-        printf("CreateWithAddress(%s) FAILED\n", host);
+        fprintf(stderr, "CreateWithAddress(%s) FAILED\n", host);
     }
 
     //***
@@ -325,11 +343,11 @@ static int test() {
     net_flags = 0;
     if ((net_ref = SCNetworkReachabilityCreateWithName(NULL, host))) {
         ok = SCNetworkReachabilityGetFlags(net_ref, &net_flags);
-        printf("CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
+        fprintf(stderr, "CreateWithName(%s) ok=%d, net_flags=%d, reach=%d\n",
                host, ok, net_flags, (net_flags & kSCNetworkFlagsReachable) != 0);
         CFRelease(net_ref);
     }  else {
-        printf("CreateWithName(%s) FAILED\n", host);
+        fprintf(stderr, "CreateWithName(%s) FAILED\n", host);
     }
     return 0;
 }

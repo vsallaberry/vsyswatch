@@ -21,35 +21,26 @@
  **   little utility for MacOS watching for availability of differents
  **   resources like network, battery, ...
  **/
-#ifndef VSYSWATCH_VSYSWATCH_H
-#define VSYSWATCH_VSYSWATCH_H
+#include "vsyswatch.h"
 
-#include <pthread.h>
+#if defined(__APPLE__) || defined(BUILD_SYS_darwin)  \
+    || defined(BUILD_SYS_openbsd) || defined(BUILD_SYS_freebsd) || defined(BUILD_SYS_netbsd)
+# include "file-bsd.c"
+#else
 
-#include "version.h"
+#include <stdio.h>
 
-/** global vsyswatch flags */
-enum {
-    FLG_NONE            = 0,
-    FLG_VERBOSE         = 1 << 0,
-    FLG_TEST            = 1 << 1,
-    FLG_TRIG_ON_START   = 1 << 2,
-    FLG_PRINT_EVENT     = 1 << 3,
-};
+void vsyswatch_file_stop(vsyswatch_ctx_t * ctx) {
+    (void) ctx;
+}
 
-/** opaque struct netlist_s declared in scnetwork */
-struct netlist_s;
+int vsyswatch_file(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void * callback_data) {
+    (void) ctx;
+    (void) callback;
+    (void) callback_data;
 
-/** global vsyswatch context */
-typedef struct {
-    unsigned int        flags;
-    struct netlist_s *  netlist;
-    void *              battery;
-    void *              network;
-    void *              file;
-    const char *        network_watch_file;
-    const char *        battery_watch_file;
-} vsyswatch_ctx_t;
-
-#endif /* ! ifndef VSYSWATCH_VSYSWATCH_H */
+    fprintf(stderr, "warning, %s is not supported on this system\n", __func__);
+    return -1;
+}
+#endif /* ! if defined apple || *bsd */
 
