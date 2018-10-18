@@ -237,7 +237,7 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
         }
     }
 
-    CFRunLoopTimerContext timer_context = { 0, &ctx, NULL, NULL, NULL };
+    CFRunLoopTimerContext timer_context = { 0, &ctx, NULL, NULL, NULL /*nul?*/};
     if ((ctx.flags & FLG_TEST) != 0) {
         timer = init_timer(&timer_context);
         if (!timer)
