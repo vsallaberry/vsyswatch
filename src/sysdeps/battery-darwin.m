@@ -348,3 +348,6 @@ static void * battery_notify(void * data) {
     return (void*) 0;
 }
 
+int vsyswatch_battery_test(vsyswatch_ctx_t * ctx) {
+    return 0;
+}

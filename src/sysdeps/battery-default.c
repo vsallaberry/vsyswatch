@@ -41,5 +41,11 @@ int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void
     fprintf(stderr, "warning, %s is not supported on this system\n", __func__);
     return -1;
 }
+
+int vsyswatch_battery_test(vsyswatch_ctx_t * ctx) {
+    (void) ctx;
+    return 0;
+}
+
 #endif /* ! if defined apple || darwin */
 
