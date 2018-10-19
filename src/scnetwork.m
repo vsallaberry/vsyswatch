@@ -196,11 +196,12 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
     if (sigaction(SIGTERM, &sa, NULL) < 0) perror("sigaction(SIGTERM)");
     fflush(stdout); fflush(stderr);
 
+    /* wait for a signal */
     pause();
 
+    /* stop watchers and clean resources */
     vsyswatch_network_stop(&ctx);
     vsyswatch_battery_stop(&ctx);
-
     netlist_delete(ctx.netlist);
 
     return 0;
@@ -245,9 +246,10 @@ typedef struct {
 
 /* darwin specic network data */
 typedef struct {
+    pthread_cond_t      wait_cond;
+    pthread_mutex_t     wait_mutex;
     CFRunLoopRef        runloop;
     pthread_t           tid;
-    CFRunLoopTimerRef   timer;
     void                (*callback)(void*,void*);
     void *              callback_data;
 } network_t;
@@ -282,98 +284,183 @@ void reachability_callback(SCNetworkReachabilityRef net_ref, SCNetworkReachabili
     }
 }
 
-void * network_thread(void * data) {
-    vsyswatch_ctx_t * ctx = (vsyswatch_ctx_t *) data;
+void observer_callback(CFRunLoopObserverRef obs_ref, CFRunLoopActivity activity, void * info) {
+    vsyswatch_ctx_t * ctx = (vsyswatch_ctx_t *) info;
     network_t * network = ctx ? (network_t *) ctx->network : NULL;
+    (void) obs_ref;
+
+    if (network) {
+        if ((ctx->flags & FLG_VERBOSE) != 0) {
+            const char * label = "CFRunLoop Unknown Activity";
+            if (activity == kCFRunLoopEntry)        label = "CFRunLoop Entry";
+            else if (activity == kCFRunLoopExit)    label = "CFRunLoop Exit";
+            fprintf(stderr, "%s(): %s (%lu)\n", __func__, label, activity);
+        }
+
+        pthread_mutex_lock(&network->wait_mutex);
+        if (activity == kCFRunLoopEntry) {
+            /* runLoop started: we can update the runLoop reference, and inform thread creator that we are ready */
+            network->runloop = CFRunLoopGetCurrent();
+            pthread_cond_signal(&network->wait_cond);
+        } else if (activity == kCFRunLoopExit) {
+            /* runLoop is exiting: remove runloop ref to avoid sending CFRunLoopStop which may crash if not started */
+            network->runloop = NULL;
+        }
+        pthread_mutex_unlock(&network->wait_mutex);
+    }
+}
+
+void * network_thread(void * data) {
+    vsyswatch_ctx_t *           ctx = (vsyswatch_ctx_t *) data;
+    network_t *                 network = ctx ? (network_t *) ctx->network : NULL;
+    long                        ret = 0;
+    CFRunLoopObserverRef        obs_ref = NULL;
+    CFRunLoopObserverContext    obs_context = { 0, ctx, NULL, NULL, NULL };
+    CFRunLoopTimerRef           timer = NULL;
+    CFRunLoopRef                runloop = CFRunLoopGetCurrent();
 
     if (ctx == NULL || network == NULL) {
-        fprintf(stderr, "error: bad network context\n");
+        fprintf(stderr, "%s(): error: bad network context\n", __func__);
         return (void *) -1;
     }
-    network->runloop = CFRunLoopGetCurrent(); // FIXME not pretty
 
-    for (netlist_t * cur = ctx->netlist; cur; cur = cur->next) {
-        netlist_data_t *    data;
-        reach_data_t *      reachdata;
-
-        if ((data = calloc(1, sizeof(netlist_data_t))) == NULL) {
-            fprintf(stderr, "error: cannot malloc netlist specific data: %s\n", strerror(errno));
-            return (void *) -1;
+    do {
+        /* Add observer which will help knowing the state of CFRunLoop: Started ? Exited ? */
+        if ((obs_ref = CFRunLoopObserverCreate(NULL, kCFRunLoopExit|kCFRunLoopEntry,
+                                               TRUE, 0, observer_callback, &obs_context)) == NULL) {
+            fprintf(stderr, "error CFRunLoopObserverCreate()\n");
+            ret = -1;
+            break ;
         }
-        cur->specific = data;
+        CFRunLoopAddObserver(runloop, obs_ref, kCFRunLoopDefaultMode);
 
-        if ((reachdata = calloc(1, sizeof(reach_data_t))) == NULL) {
-            fprintf(stderr, "error: cannot malloc netlist callback data: %s\n", strerror(errno));
-            return (void *) -1;
-        }
-        reachdata->ctx = ctx;
-        reachdata->netlist_elt = cur;
-        data->reachability_context.info = reachdata;
+        /* Create Reachability ref for each host */
+        for (netlist_t * cur = ctx->netlist; cur; cur = cur->next) {
+            netlist_data_t *    data;
+            reach_data_t *      reachdata;
 
-        if (!(data->net_ref = SCNetworkReachabilityCreateWithName(NULL, cur->host))) {
-            fprintf(stderr, "warning: cannot create net_ref for '%s'\n", cur->host);
-        } else {
-            SCNetworkReachabilityFlags net_flags;
-            if (SCNetworkReachabilityGetFlags(data->net_ref, &net_flags)) {
-                if ((ctx->flags & FLG_TRIG_ON_START) != 0) {
-                    reachability_callback(data->net_ref, net_flags, data->reachability_context.info);
-                } else {
-                    cur->status = is_reachable(net_flags);
-                    if ((ctx->flags & FLG_VERBOSE) != 0) {
-                        fprintf(stderr, "+ watching '%s' (reachable=%d, net_flags=%d)\n", cur->host, cur->status, net_flags);
+            if ((data = calloc(1, sizeof(netlist_data_t))) == NULL) {
+                fprintf(stderr, "error: cannot malloc netlist specific data: %s\n", strerror(errno));
+                ret = -1;
+                break ;
+            }
+            cur->specific = data;
+
+            if ((reachdata = calloc(1, sizeof(reach_data_t))) == NULL) {
+                fprintf(stderr, "error: cannot malloc netlist callback data: %s\n", strerror(errno));
+                ret = -1;
+                break ;
+            }
+            reachdata->ctx = ctx;
+            reachdata->netlist_elt = cur;
+            data->reachability_context.info = reachdata;
+
+            if (!(data->net_ref = SCNetworkReachabilityCreateWithName(NULL, cur->host))) {
+                fprintf(stderr, "warning: cannot create net_ref for '%s'\n", cur->host);
+            } else {
+                SCNetworkReachabilityFlags net_flags;
+                if (SCNetworkReachabilityGetFlags(data->net_ref, &net_flags)) {
+                    if ((ctx->flags & FLG_TRIG_ON_START) != 0) {
+                        reachability_callback(data->net_ref, net_flags, data->reachability_context.info);
+                    } else {
+                        cur->status = is_reachable(net_flags);
+                        if ((ctx->flags & FLG_VERBOSE) != 0) {
+                            fprintf(stderr, "+ watching '%s' (reachable=%d, net_flags=%d)\n",
+                                    cur->host, cur->status, net_flags);
+                        }
                     }
+                } else if ((ctx->flags & FLG_VERBOSE) != 0) {
+                    fprintf(stderr, "+ watching '%s' (SCNetworkReachabilityGetFlags FAILED)\n", cur->host);
                 }
-            } else if ((ctx->flags & FLG_VERBOSE) != 0) {
-                fprintf(stderr, "+ watching '%s' (SCNetworkReachabilityGetFlags FAILED)\n", cur->host);
-            }
-            if (!SCNetworkReachabilitySetCallback(data->net_ref, reachability_callback, &data->reachability_context)) {
-                fprintf(stderr, "error SCNetworkReachabilitySetCallback(%s)\n", cur->host);
-            }
-            if (!SCNetworkReachabilityScheduleWithRunLoop(data->net_ref, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode)) {
-                fprintf(stderr, "error SCNetworkReachabilityScheduleWithRunLoop(%s)\n", cur->host);
+                if (!SCNetworkReachabilitySetCallback(data->net_ref, reachability_callback, &data->reachability_context)) {
+                    fprintf(stderr, "error SCNetworkReachabilitySetCallback(%s)\n", cur->host);
+                }
+                if (!SCNetworkReachabilityScheduleWithRunLoop(data->net_ref, runloop, kCFRunLoopDefaultMode)) {
+                    fprintf(stderr, "error SCNetworkReachabilityScheduleWithRunLoop(%s)\n", cur->host);
+                }
             }
         }
+        if (ret != 0)
+            break ;
+
+        CFRunLoopTimerContext timer_context = { 0, ctx, NULL, NULL, NULL /*nul?*/};
+        if ((ctx->flags & FLG_TEST) != 0) {
+            timer = init_timer(&timer_context);
+            if (!timer)
+                fprintf(stderr, "error: Create CFRunLoopTimer FAILED\n");
+        }
+    } while (0);
+
+    /* run the CFRunLoop if no errors before */
+    if (ret == 0) {
+        CFRunLoopRun();
     }
 
-    CFRunLoopTimerContext timer_context = { 0, ctx, NULL, NULL, NULL /*nul?*/};
-    if ((ctx->flags & FLG_TEST) != 0) {
-        network->timer = init_timer(&timer_context);
-        if (!network->timer)
-            fprintf(stderr, "error: Create CFRunLoopTimer FAILED\n");
-    }
+    /* Inform thread creator that it is ready, in case Observer has not done it */
+    if ((ctx->flags & FLG_VERBOSE) != 0)
+        fprintf(stderr, "network: shutting down\n");
+    pthread_mutex_lock(&network->wait_mutex);
+    pthread_cond_signal(&network->wait_cond);
+    pthread_mutex_unlock(&network->wait_mutex);
 
-    CFRunLoopRun();
-    return (void *) 0;
+    if (obs_ref)
+        CFRelease(obs_ref);
+    if (timer)
+        CFRelease(timer);
+
+    return (void *) ret;
 }
 
 int vsyswatch_network(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void * callback_data) {
-    network_t * network = calloc(1, sizeof(network_t));
+    network_t * network;
+    int ret = -1;
 
-    if (network == NULL) {
-        fprintf(stderr, "error: cannot malloc network data: %s\n", strerror(errno));
-        return -1;
+    if (ctx == NULL) {
+        fprintf(stderr, "%s(): error: bad context\n", __func__);
+        return ret;
     }
+    if (ctx->network != NULL) {
+        fprintf(stderr, "error: network watcher is already started\n");
+        return ret;
+    }
+    if ((network = calloc(1, sizeof(network_t))) == NULL) {
+        fprintf(stderr, "error: cannot malloc network data: %s\n", strerror(errno));
+        return ret;
+    }
+
     ctx->network = network;
     network->callback = callback;
     network->callback_data = callback_data;
+    pthread_mutex_init(&network->wait_mutex, NULL);
+    pthread_cond_init(&network->wait_cond, NULL);
 
-    return pthread_create(&network->tid, NULL, &network_thread, ctx);
+    pthread_mutex_lock(&network->wait_mutex);
+    network->runloop = NULL;
+    if (pthread_create(&network->tid, NULL, &network_thread, ctx) == 0) {
+        /* wait RunLoop is ready so that it updates network->runloop reference */
+        pthread_cond_wait(&network->wait_cond, &network->wait_mutex);
+        ret = network->runloop != NULL ? 0 : -1;
+    }
+    pthread_mutex_unlock(&network->wait_mutex);
+    return ret;
 }
 
 void vsyswatch_network_stop(vsyswatch_ctx_t * ctx) {
     if (ctx && ctx->network) {
         network_t * network = (network_t *) ctx->network;
 
+        /* Stop CFRunLoop (if started) */
+        pthread_mutex_lock(&network->wait_mutex);
         if (network->runloop)
-            CFRunLoopStop(network->runloop); //[ CFRunLoopGetCurrent() stop];
+            CFRunLoopStop(network->runloop);
+        pthread_mutex_unlock(&network->wait_mutex);
+
+        /* wait for end of thread execution */
         pthread_join(network->tid, NULL);
 
-        if ((ctx->flags & FLG_VERBOSE) != 0)
-            fprintf(stderr, "\nCFRunLoop FINISHED.\n");
-
-        if (network->timer)
-            CFRelease(network->timer);
-
+        /* clean resources (clean netlist specific, other is reponsibility of function main()) */
+        pthread_cond_destroy(&network->wait_cond);
+        pthread_mutex_destroy(&network->wait_mutex);
         for (netlist_t * cur = ctx->netlist; cur; cur = cur->next) {
             netlist_data_t * data = (netlist_data_t *) cur->specific;
             if (data) {

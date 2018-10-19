@@ -68,7 +68,7 @@ int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void
         return -1;
     }
     if (ctx->battery) {
-        fprintf(stderr, "%s(): error battery is already watched\n", __func__);
+        fprintf(stderr, "%s(): error battery watcher is already started\n", __func__);
         return -1;
     }
     battery_data_t * battery = calloc(1, sizeof(battery_data_t));
@@ -349,5 +349,6 @@ static void * battery_notify(void * data) {
 }
 
 int vsyswatch_battery_test(vsyswatch_ctx_t * ctx) {
+    (void) ctx;
     return 0;
 }
