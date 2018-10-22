@@ -49,18 +49,18 @@ SUBMODROOTDIR	=
 #SUBMODROOTDIR	= ext
 
 # SUBDIRS, put empty if there is no need to run make on sub directories.
-LIB_VLIBDIR	= ext/libvsensors/ext/vlib
+LIB_VLIBDIR	= ext/vlib
 LIB_VSENSORSDIR	= ext/libvsensors
 #LIB_VLIBDIR	= $(SUBMODROOTDIR)/vlib
 #LIB_VSENSORSDIR	= $(SUBMODROOTDIR)/libvsensors
-#SUBDIRS 	= $(LIB_VLIBDIR) $(LIB_VSENSORSDIR)
-SUBDIRS 	=
+SUBDIRS 	= $(LIB_VLIBDIR)
+#SUBDIRS 	=
 
 # SUBLIBS: libraries produced from SUBDIRS, needed correct build order. Put empty if none.
 LIB_VLIB	= $(LIB_VLIBDIR)/libvlib.a
 LIB_VSENSORS	= $(LIB_VSENSORSDIR)/libvsensors.a
 #SUBLIBS		= $(LIB_VSENSORS) $(LIB_VLIB)
-SUBLIBS		=
+SUBLIBS		= $(LIB_VLIB)
 
 # INCDIRS: Folder where public includes are. It can be SRCDIR or even empty if
 # headers are only in SRCDIR. Use '.' for current directory.
