@@ -21,9 +21,11 @@
  **   little utility for MacOS watching for availability of differents
  **   resources like network, battery, ...
  **/
+#import <CoreFoundation/CoreFoundation.h>
 #import <IOKit/IOKitLib.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <IOKit/ps/IOPowerSources.h>
+#import <IOKit/ps/IOPSKeys.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,8 +45,9 @@
 
 typedef struct {
     pthread_t       tid;
-    void            (*callback)(void *, void *);
+    void            (*callback)(battery_info_t *, void *);
     void *          callback_data;
+    battery_info_t  info;
 } battery_data_t;
 
 static void *           battery_notify(void * data);
@@ -62,7 +65,7 @@ void vsyswatch_battery_stop(vsyswatch_ctx_t * ctx) {
     }
 }
 
-int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void * callback_data) {
+int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(battery_info_t*,void*), void * callback_data) {
     if (ctx == NULL) {
         fprintf(stderr, "%s(): error ctx NULL\n", __func__);
         return -1;
@@ -96,34 +99,27 @@ static int verbose(vsyswatch_ctx_t * ctx, FILE * file, const char * fmt, ...) {
     return 0;
 }
 
-enum { EV_NONE = 0, EV_AC = 1 << 0, EV_BAT_OK = 1 << 1, EV_BAT_LOW = 1 << 2 };
-
-static int register_events(vsyswatch_ctx_t * ctx, int * state, int * nf,
-                           int * ev_power_source, int * ev_low_battery, int * ev_time_remaining,
-                           int battery_warning_level, CFTimeInterval time_remaining) {
+static int register_events(vsyswatch_ctx_t * ctx, int * nf, battery_state_t * old_state,
+                           int * ev_power_source, int * ev_low_battery, int * ev_time_remaining) {
 
     const struct { const char * ev; int * tok; int flags; } *cur_ev, evs[] = {
-        { kIOPSNotifyPowerSource,   ev_power_source,   EV_AC },
-        { kIOPSNotifyTimeRemaining, ev_time_remaining, EV_BAT_LOW },
-        { kIOPSNotifyLowBattery,    ev_low_battery,    EV_BAT_OK },
+        { kIOPSNotifyPowerSource,   ev_power_source,   (1 << BS_AC) },
+        { kIOPSNotifyTimeRemaining, ev_time_remaining, (1 << BS_BAT_LOW) | (1 << BS_BAT_OK) },
+        { kIOPSNotifyLowBattery,    ev_low_battery,    (1 << BS_NONE) },
         { NULL, NULL, 0 }
     };
-    int new_state;
+    battery_data_t * battery = ctx ? (battery_data_t *) ctx->battery : NULL;
     int status;
 
-    if (time_remaining == kIOPSTimeRemainingUnlimited) {
-        new_state = EV_AC;
-    } else if (battery_warning_level == kIOPSLowBatteryWarningNone) {
-        new_state = EV_BAT_OK;
-    } else {
-        new_state = EV_BAT_LOW;
+    if (!battery) {
+        return -1;
     }
 
-    if (new_state != *state) {
-        int notify_flags = (*nf == -1) ? 0 : NOTIFY_REUSE;
+    int notify_flags = (*nf == -1) ? 0 : NOTIFY_REUSE;
 
+    if (old_state && *old_state != battery->info.state) {
         for (cur_ev = evs; cur_ev && cur_ev->ev; cur_ev++) {
-            if ((cur_ev->flags & new_state) != 0) {
+            if ((cur_ev->flags & (1 << battery->info.state)) != 0 && (cur_ev->flags & (1 << *old_state)) == 0) {
                 status = notify_register_file_descriptor(cur_ev->ev, nf, notify_flags, cur_ev->tok);
                 if (status != NOTIFY_STATUS_OK) {
                     fprintf(stderr, "%s(): notify registration failed (%u) for %s\n", __func__, status, cur_ev->ev);
@@ -133,14 +129,13 @@ static int register_events(vsyswatch_ctx_t * ctx, int * state, int * nf,
             }
         }
         for (cur_ev = evs; cur_ev && cur_ev->ev; cur_ev++) {
-            if ((cur_ev->flags & new_state) == 0 && *cur_ev->tok != -1) {
+            if ((cur_ev->flags & (1 << battery->info.state)) == 0 && *cur_ev->tok != -1) {
                 notify_cancel(*cur_ev->tok);
                 *cur_ev->tok = -1;
                 verbose(ctx, stderr, "%s(): %s: unregistered.\n", __func__, cur_ev->ev);
             }
         }
-
-        *state = new_state;
+        *old_state = battery->info.state;
     }
     return (*nf >= 0) ? 0 : -1;
 }
@@ -199,15 +194,118 @@ static void sig_handler(int sig, siginfo_t * sig_info,  void * data) {
     pthread_sigmask(SIG_SETMASK, &save, NULL);
 }
 
+static void print_battery_dict(const void * key, const void * value, void * context) {
+    vsyswatch_ctx_t * ctx = (vsyswatch_ctx_t *) context;
+    char buffer1[128];
+    char buffer2[128];
+    (void) ctx;
+
+    CFStringRef value_desc = CFCopyDescription(value);
+    CFStringGetCString(key, buffer1, sizeof(buffer1), kCFStringEncodingASCII);
+    CFStringGetCString(value_desc, buffer2, sizeof(buffer2), kCFStringEncodingASCII);
+    fprintf(stderr, "KEY <%s> = <%s>\n", buffer1, buffer2);
+
+    if (value_desc)
+        CFRelease(value_desc);
+}
+
+static int get_battery_info(vsyswatch_ctx_t * ctx) {
+    battery_data_t * battery = ctx ? (battery_data_t *) ctx->battery : NULL;
+    CFTypeRef binfo;
+    CFArrayRef barray = NULL;
+    CFDictionaryRef bdict = NULL;
+    CFTypeRef bsource = NULL;
+    int max_capacity = 0;
+    int current_capacity = 0;
+    long time_remaining = 0;
+    int debug = (ctx->flags & FLG_TEST) != 0;
+
+    binfo = IOPSCopyPowerSourcesInfo();
+    barray = IOPSCopyPowerSourcesList(binfo);
+
+    if (battery && binfo && barray) {
+        for (int i = 0; i < CFArrayGetCount(barray); i++) {
+            const void * value;
+            int n;
+            long l;
+
+            if (debug)
+                fprintf(stderr, "\n ***** PowerSource #%i ******************************\n", i);
+
+            bsource = CFArrayGetValueAtIndex(barray, i);
+            if (CFGetTypeID(bsource) != CFDictionaryGetTypeID())
+                continue ;
+
+            bdict = IOPSGetPowerSourceDescription(binfo, bsource);
+
+            if (CFDictionaryGetValueIfPresent(bdict, (__bridge CFStringRef) @kIOPSPowerSourceStateKey, &value)
+            && CFStringGetTypeID() == CFGetTypeID(value)) {
+                if (!CFStringCompare(value, (__bridge CFStringRef) @kIOPSACPowerValue, 0))
+                    time_remaining = VSYSWATCH_BATTERY_INFINITE_TIME;
+            }
+
+            if (!CFDictionaryGetValueIfPresent(bdict, (__bridge CFStringRef) @kIOPSIsPresentKey, &value)
+            || CFBooleanGetTypeID() != CFGetTypeID(value) || value != kCFBooleanTrue) {
+                continue ;
+            }
+
+            if (CFDictionaryGetValueIfPresent(bdict, (__bridge CFStringRef) @kIOPSMaxCapacityKey, &value)
+            && CFNumberGetTypeID() == CFGetTypeID(value)) {
+                if (CFNumberGetValue(value, kCFNumberIntType, &n))
+                    max_capacity += n;
+            }
+            if (CFDictionaryGetValueIfPresent(bdict, (__bridge CFStringRef) @kIOPSCurrentCapacityKey, &value)
+            && CFNumberGetTypeID() == CFGetTypeID(value)) {
+                if (CFNumberGetValue(value, kCFNumberIntType, &n))
+                    current_capacity += n;
+            }
+            if (CFDictionaryGetValueIfPresent(bdict, (__bridge CFStringRef) @kIOPSTimeToEmptyKey, &value)
+            && CFNumberGetTypeID() == CFGetTypeID(value)) {
+                if (CFNumberGetValue(value, kCFNumberLongType, &l)) {
+                    if (l < 0)
+                        time_remaining = VSYSWATCH_BATTERY_UNKNOWN_TIME;
+                    else if (time_remaining >= 0)
+                        time_remaining += l;
+                }
+            }
+
+            if (debug)
+                CFDictionaryApplyFunction(bdict, print_battery_dict, NULL);
+        }
+
+        battery->info.percents = max_capacity ? ((current_capacity * 100) / max_capacity) : 0;
+        battery->info.time_remaining = time_remaining;
+        if (battery->info.time_remaining == VSYSWATCH_BATTERY_INFINITE_TIME) {
+            battery->info.state = BS_AC;
+        } else if (battery->info.time_remaining > ctx->battery_time_remaining_low
+        && battery->info.percents > ctx->battery_percents_low) {
+            battery->info.state = BS_BAT_OK;
+        } else {
+            battery->info.state = BS_BAT_LOW;
+        }
+
+        if (debug)
+            fprintf(stderr, "CHARGE: %d%% remaining: %ld state %d\n",
+                    battery->info.percents, time_remaining, battery->info.state);
+    }
+
+    if (binfo)
+        CFRelease(binfo);
+    if (barray)
+        CFRelease(barray);
+
+    return 0;
+}
+
 static void * battery_notify(void * data) {
     vsyswatch_ctx_t *   ctx = (vsyswatch_ctx_t *) data;
     battery_data_t *    battery = (battery_data_t *) ctx->battery;
-    int                 nf = -1, state = EV_NONE;
+    int                 nf = -1;
     int                 ev_low_battery = -1, ev_time_remaining = -1, ev_power_source = -1;
     fd_set              readfds, errfds;
     int                 t, ret;
-    CFTimeInterval      time_remaining;
-    int                 battery_warning_level;
+    battery_info_t      battery_info_copy = { .state = BS_NONE, .time_remaining = LONG_MAX, .percents = CHAR_MAX };
+    battery_state_t     old_state = BS_NONE;
     struct sigaction    sa = { .sa_sigaction = sig_handler, .sa_flags = SA_SIGINFO };
     volatile sig_atomic_t thread_running = 1;
 
@@ -224,19 +322,18 @@ static void * battery_notify(void * data) {
         return (void*) -1;
     }
 
-    time_remaining = IOPSGetTimeRemainingEstimate();
-    battery_warning_level = IOPSGetBatteryWarningLevel();
-    if (register_events(ctx, &state, &nf, &ev_power_source, &ev_low_battery, &ev_time_remaining,
-                        battery_warning_level, time_remaining) != 0) {
+    get_battery_info(ctx);
+
+    /*CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(IOPowerSourceCallbackType callback, void *context);
+     *                   IOPSCreateLimitedPowerNotification */
+
+    if (register_events(ctx, &nf, &old_state, &ev_power_source, &ev_low_battery, &ev_time_remaining) != 0) {
         return (void *) -1;
     }
 
     if ((ctx->flags & FLG_TRIG_ON_START) != 0 && battery->callback) {
-        long l;
-        if (time_remaining == kIOPSTimeRemainingUnknown) l = -4;
-        else if (time_remaining == kIOPSTimeRemainingUnlimited) l = -5;
-        else l = (long)(time_remaining);
-        battery->callback((void*) l, battery->callback_data);
+        memcpy(&battery_info_copy, &battery->info, sizeof(battery_info_t));
+        battery->callback(&battery_info_copy, battery->callback_data);
     }
 
     while (thread_running) {
@@ -266,49 +363,45 @@ static void * battery_notify(void * data) {
         }
         t = ntohl(t);
 
-        battery_warning_level = IOPSGetBatteryWarningLevel();
-        time_remaining = IOPSGetTimeRemainingEstimate();
+        get_battery_info(ctx);
 
         if (t == ev_low_battery) {
-            switch (battery_warning_level) {
-                case kIOPSLowBatteryWarningNone:
-                    /*The system is not in a low battery situation, or is on drawing from an external power source.*/
-                    verbose(ctx, stderr, "battery: EVENT lowbattery kIOPSLowBatteryWarningNone\n");
-                    if (battery->callback)
-                        battery->callback((void*)-1, battery->callback_data);
-                    break ;
-                case kIOPSLowBatteryWarningEarly:
-                    /* The system is in an early low battery situation.
-                     * Per Apple's definition, the battery has dropped below 22% remaining power. */
-                    verbose(ctx, stderr, "battery: EVENT lowbattery IOPSLowBatteryWarningEarly\n");
-                    if (battery->callback)
-                        battery->callback((void*)-2, battery->callback_data);
-                    break ;
-                case kIOPSLowBatteryWarningFinal:
-                    /* The battery can provide no more than 10 minutes of runtime. */
-                    verbose(ctx, stderr, "battery: EVENT lowbattery kIOPSLowBatteryWarningFinal\n");
-                    if (battery->callback)
-                        battery->callback((void*)-3, battery->callback_data);
-                    break ;
-                default:
-                    verbose(ctx, stderr, "battery: EVENT lowbattery IOPSLowBatteryWarningLevel %d\n", t);
-                    if (battery->callback)
-                        battery->callback((void*)((long)time_remaining), battery->callback_data);
-                    break ;
+            const char * str = "";
+            if ((ctx->flags & FLG_TEST) != 0) {
+                IOPSLowBatteryWarningLevel battery_warning_level = IOPSGetBatteryWarningLevel();
+                switch (battery_warning_level) {
+                    case kIOPSLowBatteryWarningNone:
+                        /*The system is not in a low battery situation, or is on drawing from an external power source.*/
+                        str = " kIOPSLowBatteryWarningNone";
+                        break ;
+                    case kIOPSLowBatteryWarningEarly:
+                        /* The system is in an early low battery situation.
+                         * Per Apple's definition, the battery has dropped below 22% remaining power. */
+                        str = " IOPSLowBatteryWarningEarly";
+                        break ;
+                    case kIOPSLowBatteryWarningFinal:
+                        /* The battery can provide no more than 10 minutes of runtime. */
+                        str = " kIOPSLowBatteryWarningFinal";
+                        break ;
+                    default:
+                        str = " IOPSLowBatteryWarningLevel %d";
+                        break ;
+                }
             }
+            verbose(ctx, stderr, "battery: EVENT lowbattery%s %ld remaining, percents %d%%, state %d\n",
+                    str, battery->info.time_remaining, battery->info.percents, battery->info.state);
         } else if (t == ev_time_remaining) {
-            if (time_remaining == kIOPSTimeRemainingUnknown) {
-                verbose(ctx, stderr, "battery: EVENT timeremaining kIOPSTimeRemainingUnknown\n");
-                if (battery->callback)
-                    battery->callback((void*)-4, battery->callback_data);
-            } else if (time_remaining == kIOPSTimeRemainingUnlimited) {
-                verbose(ctx, stderr, "battery: EVENT timeremaining kIOPSTimeRemainingUnlimited\n");
-                if (battery->callback)
-                    battery->callback((void*)-5, battery->callback_data);
+            if (battery->info.time_remaining == VSYSWATCH_BATTERY_UNKNOWN_TIME) {
+                verbose(ctx, stderr, "battery: EVENT timeremaining kIOPSTimeRemainingUnknown "
+                                     "%ld remaining, percents %d%%, state %d\n",
+                        battery->info.time_remaining, battery->info.percents, battery->info.state);
+            } else if (battery->info.time_remaining == VSYSWATCH_BATTERY_INFINITE_TIME) {
+                verbose(ctx, stderr, "battery: EVENT timeremaining kIOPSTimeRemainingUnlimited "
+                                     "%ld remaining, percents %d%%, state %d\n",
+                        battery->info.time_remaining, battery->info.percents, battery->info.state);
             } else {
-                verbose(ctx, stderr, "battery: EVENT timeremaining %lf remaining\n", time_remaining);
-                if (battery->callback)
-                    battery->callback((void*)((long)time_remaining), battery->callback_data);
+                verbose(ctx, stderr, "battery: EVENT timeremaining %ld, percents %d%%, state %d\n",
+                        battery->info.time_remaining, battery->info.percents, battery->info.state);
             }
         } else if (t == ev_power_source) {
             /* @define      kIOPSNotifyPowerSource
@@ -318,27 +411,38 @@ static void * battery_notify(void * data) {
              * time remaining changes, only when the active power source changes. This makes it a more effiicent
              * choice for clients only interested in differentiating AC vs Battery.
              */
-            if (time_remaining == kIOPSTimeRemainingUnknown) {
-                verbose(ctx, stderr, "battery: EVENT powersource kIOPSTimeRemainingUnknown\n");
-                if (battery->callback)
-                    battery->callback((void*)-4, battery->callback_data);
-            } else if (time_remaining == kIOPSTimeRemainingUnlimited) {
-                verbose(ctx, stderr, "battery: EVENT powersource kIOPSTimeRemainingUnlimited\n");
-                if (battery->callback)
-                    battery->callback((void*)-5, battery->callback_data);
+            if (battery->info.time_remaining == VSYSWATCH_BATTERY_UNKNOWN_TIME) {
+                verbose(ctx, stderr, "battery: EVENT powersource kIOPSTimeRemainingUnknown "
+                                     "%ld remaining, percents %d%%, state %d\n",
+                        battery->info.time_remaining, battery->info.percents, battery->info.state);
+            } else if (battery->info.time_remaining == VSYSWATCH_BATTERY_INFINITE_TIME) {
+                verbose(ctx, stderr, "battery: EVENT powersource kIOPSTimeRemainingUnlimited "
+                                     "%ld remaining, percents %d%%, state %d\n",
+                        battery->info.time_remaining, battery->info.percents, battery->info.state);
             } else {
-                verbose(ctx, stderr, "battery: EVENT powersource %lf remaining\n", time_remaining);
-                if (battery->callback)
-                    battery->callback((void*)((long)time_remaining), battery->callback_data);
+                verbose(ctx, stderr, "battery: EVENT powersource %ld remaining, percents %d%%, state %d\n",
+                        battery->info.time_remaining, battery->info.percents, battery->info.state);
             }
         } else {
-            fprintf(stderr, "battery: unknown EVENT (%d)\n", t);
+            fprintf(stderr, "battery: unknown EVENT (%d) %ld remaining, percents %d%%, state %d\n",
+                    t, battery->info.time_remaining, battery->info.percents, battery->info.state);
         }
 
-        if (register_events(ctx, &state, &nf, &ev_power_source, &ev_low_battery, &ev_time_remaining,
-                            battery_warning_level, time_remaining) != 0) {
+        if (battery->callback) {
+            /* callback only if state change, or if data changes while the state is bs_bat_low */
+            if ((battery->info.state != battery_info_copy.state || battery->info.state == BS_BAT_LOW)
+            && memcmp(&battery->info, &battery_info_copy, sizeof(battery_info_t))) {
+                memcpy(&battery_info_copy, &battery->info, sizeof(battery_info_t));
+                battery->callback(&battery_info_copy, battery->callback_data);
+            }
+        }
+
+        if (old_state != battery->info.state
+        && register_events(ctx, &nf, &old_state, &ev_power_source, &ev_low_battery, &ev_time_remaining) != 0) {
             break ;
         }
+        old_state = battery->info.state;
+
     }
     verbose(ctx, stderr, "battery: shutting down\n");
     notify_cancel(ev_low_battery);

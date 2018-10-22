@@ -33,14 +33,6 @@
 #include "version.h"
 #include "vsyswatch.h"
 
-/* generic network host list */
-typedef struct netlist_s {
-    const char *                    host;
-    char                            status;
-    void *                          specific;
-    struct netlist_s *              next;
-} netlist_t;
-
 int touch(const char * file) {
     int fd = open(file, O_CREAT | O_WRONLY | O_APPEND, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
     if (fd < 0) {
@@ -67,23 +59,29 @@ void network_callback(netlist_t * netlist_elt, void * data) {
         touch(ctx->network_watch_file);
 }
 
-void battery_callback(void * info, void * data) {
-    static const char * info_str[] = { "warning_none", "warning_early", "warning_final",
-                                       "timeremaining_unknown", "timeremaining_unlimited" };
+void battery_callback(battery_info_t * info, void * data) {
+    const char * state_strs[] = { "none", "ac", "bat_ok", "bat_low", "unknown" };
     vsyswatch_ctx_t * ctx = (vsyswatch_ctx_t *) data;
     if ((ctx->flags & FLG_PRINT_EVENT) != 0) {
-        const char * str;
-        if ((long)info >= 0)
-            str = "time_remaining";
-        else {
-            unsigned long idx  = (-((long)info) - 1);
-            if (idx < sizeof(info_str) / sizeof(*info_str))
-                str = info_str[idx];
-            else
-                str = "unknown";
-        }
-        fprintf(stdout, "%-10s | info: %s | val: %ld\n", "BATTERY", str, (long) info);
-        fflush(stdout);
+        FILE * out = stdout;
+        const char * str = NULL;
+        const char * state_str = info->state >= 0 && info->state < sizeof(state_strs)/sizeof(*state_strs) - 1 ?
+                        state_strs[info->state] : state_strs[sizeof(state_strs)/sizeof(*state_strs)-1];
+        if (info->time_remaining == VSYSWATCH_BATTERY_UNKNOWN_TIME)
+            str = "unknown";
+        else if (info->time_remaining == VSYSWATCH_BATTERY_INFINITE_TIME)
+            str = "unlimited";
+        else if (info->time_remaining < 0)
+            str = "bad_state";
+        flockfile(out);
+        fprintf(out, "%-10s | state: %s | time_remaining: ", "BATTERY", state_str);
+        if (str)
+            fprintf(out, "%s", str);
+        else
+            fprintf(out, "%ld", info->time_remaining);
+        fprintf(out, " | percents: %d%%\n", info->percents);
+        fflush(out);
+        funlockfile(out);
     }
     if (ctx->battery_watch_file)
         touch(ctx->battery_watch_file);
@@ -119,14 +117,14 @@ static void sig_handler(int sig) {
     (void)sig;
 }
 
-int         vsyswatch_battery(vsyswatch_ctx_t * ctx, void(*)(void*,void*), void *);
+int         vsyswatch_battery(vsyswatch_ctx_t * ctx, void(*)(battery_info_t*,void*), void *);
 void        vsyswatch_battery_stop(vsyswatch_ctx_t * ctx);
 int         vsyswatch_battery_test(vsyswatch_ctx_t * ctx);
 
 /* temporary function renaming to avoid conflicts with sysdeps/network-default.c */
 #define vsyswatch_network       vsyswatch_network_main
 #define vsyswatch_network_stop  vsyswatch_network_stop_main
-int         vsyswatch_network(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void * callback_data);
+int         vsyswatch_network(vsyswatch_ctx_t * ctx, void (*callback)(netlist_t*,void*), void * callback_data);
 void        vsyswatch_network_stop(vsyswatch_ctx_t * ctx);
 int         vsyswatch_network_test(vsyswatch_ctx_t * ctx);
 
@@ -136,7 +134,9 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
     vsyswatch_ctx_t             ctx = { .flags = FLG_NONE | FLG_PRINT_EVENT,
                                         .netlist = NULL, .battery = NULL, .file = NULL,
                                         .network_watch_file = NULL,
-                                        .battery_watch_file = NULL };
+                                        .battery_watch_file = NULL,
+                                        .battery_percents_low = 12,
+                                        .battery_time_remaining_low = 15 };
 
     fprintf(stderr, "%s v%s git#%s (GPL v3 - Copyright (c) 2018 Vincent Sallaberry)\n",
             BUILD_APPNAME, APP_VERSION, BUILD_GITREV);
@@ -250,7 +250,7 @@ typedef struct {
     pthread_mutex_t     wait_mutex;
     CFRunLoopRef        runloop;
     pthread_t           tid;
-    void                (*callback)(void*,void*);
+    void                (*callback)(netlist_t*,void*);
     void *              callback_data;
 } network_t;
 
@@ -411,7 +411,7 @@ void * network_thread(void * data) {
     return (void *) ret;
 }
 
-int vsyswatch_network(vsyswatch_ctx_t * ctx, void (*callback)(void*,void*), void * callback_data) {
+int vsyswatch_network(vsyswatch_ctx_t * ctx, void (*callback)(netlist_t*,void*), void * callback_data) {
     network_t * network;
     int ret = -1;
 

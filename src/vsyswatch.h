@@ -37,8 +37,25 @@ enum {
     FLG_PRINT_EVENT     = 1 << 3,
 };
 
-/** opaque struct netlist_s declared in scnetwork */
-struct netlist_s;
+/* generic network host list */
+typedef struct netlist_s {
+    const char *                    host;
+    char                            status;
+    void *                          specific;
+    struct netlist_s *              next;
+} netlist_t;
+
+/* battery info */
+typedef enum {
+    BS_NONE = 0, BS_AC = 1, BS_BAT_OK = 2, BS_BAT_LOW = 3
+} battery_state_t;
+# define VSYSWATCH_BATTERY_UNKNOWN_TIME -1
+# define VSYSWATCH_BATTERY_INFINITE_TIME -2
+typedef struct {
+    battery_state_t     state;
+    char                percents;
+    long                time_remaining; /*minutes*/
+} battery_info_t;
 
 /** global vsyswatch context */
 typedef struct {
@@ -49,6 +66,8 @@ typedef struct {
     void *              file;
     const char *        network_watch_file;
     const char *        battery_watch_file;
+    char                battery_percents_low;
+    long                battery_time_remaining_low;
 } vsyswatch_ctx_t;
 
 #endif /* ! ifndef VSYSWATCH_VSYSWATCH_H */
