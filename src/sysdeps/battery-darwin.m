@@ -167,11 +167,13 @@ static void sig_handler(int sig, siginfo_t * sig_info,  void * data) {
     }
     /* following is not a signal */
     sigset_t block, save;
+    sigemptyset(&block);
     sigaddset(&block, SIG_KILL_THREAD);
     pthread_sigmask(SIG_BLOCK, &block, &save);
     pthread_mutex_lock(&mutex);
     /* special mode to delete threadlist, but if thread exited normally this should not be necessary */
     if (sig == SIG_SPECIAL_VALUE && sig_info == NULL && data == NULL) {
+        fprintf(stderr, "%s(): flag_sig_handler deleting all\n", __func__);
         for (struct threadlist_s * cur = threadlist; cur; ) {
             struct threadlist_s * to_delete = cur;
             cur = cur->next;
@@ -180,6 +182,7 @@ static void sig_handler(int sig, siginfo_t * sig_info,  void * data) {
         threadlist = NULL;
     } else {
         /* if this is reached we register the data as running ptr for pthread_self() */
+        fprintf(stderr, "%s(): flag_sig_handler registering thread %lu\n", __func__, (unsigned long)tself);
         struct threadlist_s * new = malloc(sizeof(struct threadlist_s));
         if (new) {
             new->tid = tself;
@@ -187,7 +190,7 @@ static void sig_handler(int sig, siginfo_t * sig_info,  void * data) {
             new->next = threadlist;
             threadlist = new;
         } else {
-            fprintf(stderr, "%s(): malloc threadlist error: %s\n", __func__, strerror(errno));
+            fprintf(stderr, "%s(): flag_sig_handler: malloc threadlist error: %s\n", __func__, strerror(errno));
         }
     }
     pthread_mutex_unlock(&mutex);
@@ -306,8 +309,15 @@ static void * battery_notify(void * data) {
     int                 t, ret;
     battery_info_t      battery_info_copy = { .state = BS_NONE, .time_remaining = LONG_MAX, .percents = CHAR_MAX };
     battery_state_t     old_state = BS_NONE;
-    struct sigaction    sa = { .sa_sigaction = sig_handler, .sa_flags = SA_SIGINFO };
+    struct sigaction    sa = { .sa_sigaction = sig_handler, .sa_flags = SA_SIGINFO | SA_RESTART };
     volatile sig_atomic_t thread_running = 1;
+    sigset_t            sigset;
+
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIG_KILL_THREAD);
+    pthread_sigmask(SIG_BLOCK, &sigset, NULL);
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGINT);
 
     /* call sig_handler to register this thread with thread_running ptr */
     if (sigaction(SIG_SPECIAL_VALUE, &sa, NULL) == 0) {
@@ -341,7 +351,7 @@ static void * battery_notify(void * data) {
         FD_ZERO(&errfds);
         FD_SET(nf, &readfds);
         FD_SET(nf, &errfds);
-        ret = select(nf+1, &readfds, NULL, &errfds, NULL);
+        ret = pselect(nf+1, &readfds, NULL, &errfds, NULL, &sigset);
         if (ret == 0) {
             verbose(ctx, stderr, "%s(): notify select timeout\n", __func__);
             continue ;
