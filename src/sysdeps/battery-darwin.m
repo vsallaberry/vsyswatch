@@ -52,6 +52,7 @@ typedef struct {
 
 static void *           battery_notify(void * data);
 static pthread_mutex_t  mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t   cond  = PTHREAD_COND_INITIALIZER;
 
 void vsyswatch_battery_stop(vsyswatch_ctx_t * ctx) {
     if (ctx && ctx->battery) {
@@ -66,6 +67,9 @@ void vsyswatch_battery_stop(vsyswatch_ctx_t * ctx) {
 }
 
 int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(battery_info_t*,void*), void * callback_data) {
+    sigset_t sigset, sigsetsave;
+    int ret;
+
     if (ctx == NULL) {
         fprintf(stderr, "%s(): error ctx NULL\n", __func__);
         return -1;
@@ -82,7 +86,20 @@ int vsyswatch_battery(vsyswatch_ctx_t * ctx, void (*callback)(battery_info_t*,vo
     }
     battery->callback = callback;
     battery->callback_data = callback_data;
-    return pthread_create(&battery->tid, NULL, battery_notify, ctx);
+
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIG_KILL_THREAD);
+    sigaddset(&sigset, SIGINT);
+    pthread_sigmask(SIG_SETMASK, &sigset, &sigsetsave);
+
+    pthread_mutex_lock(&mutex);
+    if ((ret = pthread_create(&battery->tid, NULL, battery_notify, ctx)) == 0) {
+        pthread_cond_wait(&cond, &mutex);
+    }
+    pthread_mutex_unlock(&mutex);
+
+    pthread_sigmask(SIG_SETMASK, &sigsetsave, NULL);
+    return ret;
 }
 
 static int verbose(vsyswatch_ctx_t * ctx, FILE * file, const char * fmt, ...) {
@@ -313,21 +330,21 @@ static void * battery_notify(void * data) {
     volatile sig_atomic_t thread_running = 1;
     sigset_t            sigset;
 
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIG_KILL_THREAD);
-    pthread_sigmask(SIG_BLOCK, &sigset, NULL);
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIGINT);
-
     /* call sig_handler to register this thread with thread_running ptr */
     if (sigaction(SIG_SPECIAL_VALUE, &sa, NULL) == 0) {
+        pthread_mutex_lock(&mutex);
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
         fprintf(stderr, "%s(): error sigaction(%d) is accepted, "
                         "choose another value for SIG_SPECIAL_VALUE\n", __func__, SIG_SPECIAL_VALUE);
         return (void*) -1;
     }
     sig_handler(SIG_SPECIAL_VALUE, NULL, (void *) &thread_running);
+    pthread_mutex_lock(&mutex);
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIG_KILL_THREAD, &sa, NULL) < 0) {
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
         fprintf(stderr, "%s(): error sigaction(%d): %s\n", __func__, SIG_KILL_THREAD, strerror(errno));
         return (void*) -1;
     }
@@ -338,13 +355,22 @@ static void * battery_notify(void * data) {
      *                   IOPSCreateLimitedPowerNotification */
 
     if (register_events(ctx, &nf, &old_state, &ev_power_source, &ev_low_battery, &ev_time_remaining) != 0) {
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
         return (void *) -1;
     }
+
+    pthread_cond_signal(&cond);
+    pthread_mutex_unlock(&mutex);
 
     if ((ctx->flags & FLG_TRIG_ON_START) != 0 && battery->callback) {
         memcpy(&battery_info_copy, &battery->info, sizeof(battery_info_t));
         battery->callback(&battery_info_copy, battery->callback_data);
     }
+
+    /* for pselect */
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGINT);
 
     while (thread_running) {
         FD_ZERO(&readfds);
