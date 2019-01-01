@@ -1,5 +1,5 @@
 /*
- ** Copyright (C) 2018 Vincent Sallaberry
+ ** Copyright (C) 2018-2019 Vincent Sallaberry
  ** vsyswatch <https://github.com/vsallaberry/vsyswatch>
  **
  ** This program is free software; you can redistribute it and/or modify

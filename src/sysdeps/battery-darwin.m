@@ -1,5 +1,5 @@
 /*
- ** Copyright (C) 2018 Vincent Sallaberry
+ ** Copyright (C) 2018-2019 Vincent Sallaberry
  ** vsyswatch <https://github.com/vsallaberry/vsyswatch>
  **
  ** This program is free software; you can redistribute it and/or modify
@@ -166,7 +166,7 @@ static void sig_handler(int sig, siginfo_t * sig_info,  void * data) {
     pthread_t   tself = pthread_self();
 
     if (sig != SIG_SPECIAL_VALUE) {
-        if (sig_info && sig_info->si_pid == getpid()) {
+        if (sig_info && (sig_info->si_pid == 0 || sig_info->si_pid == getpid())) {
             /* looking for tid in threadlist and update running if found, then delete entry */
             for (struct threadlist_s * prev = NULL, * cur = threadlist; cur; prev = cur, cur = cur->next) {
                 if (tself == cur->tid && cur->running) {
@@ -377,9 +377,11 @@ static void * battery_notify(void * data) {
         FD_ZERO(&errfds);
         FD_SET(nf, &readfds);
         FD_SET(nf, &errfds);
+        struct timespec ts = { .tv_sec = 3, .tv_nsec = 0 };
         ret = pselect(nf+1, &readfds, NULL, &errfds, NULL, &sigset);
         if (ret == 0) {
             verbose(ctx, stderr, "%s(): notify select timeout\n", __func__);
+            //break;
             continue ;
         }
         if (ret < 0 && errno == EINTR) {
