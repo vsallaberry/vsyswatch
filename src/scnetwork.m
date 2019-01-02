@@ -30,6 +30,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include "vlib/options.h"
+
 #include "version.h"
 #include "vsyswatch.h"
 
@@ -150,9 +152,8 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
                                               " [-T] [host1[ host2[...]]]\n", *argv);
                               vsyswatch_quit(0, &ctx);
                               break;
-                    case 's': for (const char *const* s = vsyswatch_get_source(); s && *s; s++) {
-                                  fprintf(stdout, "%s\n", *s);
-                              }
+                    case 's': vsyswatch_get_source(stdout, NULL, 0, NULL);
+                              vlib_get_source(stdout, NULL, 0, NULL);
                               vsyswatch_quit(0, &ctx);
                               break ;
                     case 'x': ctx.flags |= FLG_TRIG_ON_START; break ;

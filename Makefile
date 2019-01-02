@@ -84,18 +84,18 @@ INSTALL_FILES	= $(BIN)
 
 # Project specific Flags (system specific flags are handled further)
 # Choice between <flag>_RELEASE/_DEBUG is done according to BUILDINC / make debug
-WARN_RELEASE	= -Wall -W -pedantic # -Wno-ignored-attributes -Wno-attributes
+WARN_RELEASE	= -Wall -W -pedantic $(sys_WARN) # -Wno-ignored-attributes -Wno-attributes
 ARCH_RELEASE	= -march=native # -arch i386 -arch x86_64
-OPTI_COMMON	= -pipe -fstack-protector
+OPTI_COMMON	= -pipe -fstack-protector $(sys_OPTI)
 OPTI_RELEASE	= -O3 $(OPTI_COMMON)
-INCS_RELEASE	=
-LIBS_RELEASE	= $(SUBLIBS) -lpthread -ldl
+INCS_RELEASE	= $(sys_INCS)
+LIBS_RELEASE	= $(SUBLIBS) $(sys_LIBS) -lpthread -ldl -lz
 MACROS_RELEASE	=
 WARN_DEBUG	= $(WARN_RELEASE) # -Werror
 ARCH_DEBUG	= $(ARCH_RELEASE)
 OPTI_DEBUG	= -O0 -g $(OPTI_COMMON)
 INCS_DEBUG	= $(INCS_RELEASE)
-LIBS_DEBUG	= $(LIBS_RELEASE)
+LIBS_DEBUG	= $(LIBS_RELEASE) $(sys_LIBS)
 MACROS_DEBUG	= -D_DEBUG -D_TEST
 # FLAGS_<lang> is global for one language (<lang>: C,CXX,OBJC,GCJ,GCJH,OBJCXX,LEX,YACC).
 FLAGS_C		= -std=c99 -D_GNU_SOURCE
@@ -158,10 +158,13 @@ TR		= tr
 GIT		= git
 DIFF		= diff
 UNIQ		= uniq
-INSTALL		= install -c -m 0644
-INSTALLBIN	= install -c -m 0755
-INSTALLDIR	= install -c -d -m 0755
+OD		= od
+GZIP		= gzip
+INSTALL		= install -m 0644
+INSTALLBIN	= install -m 0755
+INSTALLDIR	= install -d -m 0755
 VALGRIND	= valgrind
+VALGRIND_ARGS	= --leak-check=full --track-origins=yes --show-leak-kinds=all -v
 MKTEMP		= mktemp
 NO_STDERR	= 2> /dev/null
 NO_STDOUT	= > /dev/null
@@ -214,19 +217,21 @@ VERSIONINC	= version.h
 SYSDEPDIR	= sysdeps
 
 # SRCINC containing source code is included if APP_INCLUDE_SOURCE is defined in VERSIONINC.
-SRCINCNAME	= _src_.c
 SRCINCDIR	= $(BUILDDIR)
+SRCINC_STR	= $(SRCINCDIR)/_src_.c
+SRCINC_Z	= $(SRCINCDIR)/_src_.z.c
 
-cmd_SRCINC	= $(cmd_FINDBSDOBJ); ! $(TEST) -e $(VERSIONINC) \
-		  || $(GREP) -Eq '^[[:space:]]*\#[[:space:]]*define APP_INCLUDE_SOURCE([[:space:]]|$$)' \
-	                                $(VERSIONINC) $(NO_STDERR) && echo $(SRCINCDIR)/$(SRCINCNAME) | $(SED) -e 's|^\./||' || true
-tmp_SRCINC	!= $(cmd_SRCINC)
-tmp_SRCINC	?= $(shell $(cmd_SRCINC))
-SRCINC		:= $(tmp_SRCINC)
-
-# Get Debug mode in build.h
-cmd_RELEASEMODE	= $(GREP) -Eq '^[[:space:]]*\#[[:space:]]*define BUILD_DEBUG([[:space:]]|$$)' \
-				$(BUILDINC) $(NO_STDERR) && echo DEBUG || echo RELEASE
+# Get Debug/Test mode in build.h
+WARN_TEST	= $(WARN_RELEASE)
+OPTI_TEST	= $(OPTI_RELEASE)
+ARCH_TEST	= $(ARCH_RELEASE)
+INCS_TEST	= $(INCS_RELEASE)
+LIBS_TEST	= $(LIBS_RELEASE)
+MACROS_TEST	?= $(MACROS_RELEASE) -D_TEST
+cmd_RELEASEMODE = $(SED) -n -e 's/^[[:space:]]*\#[[:space:]]*define[[:space:]][[:space:]]*BUILD_APPRELEASE[[:space:]]*"\([^"]*\).*/\1/p' \
+       		     $(BUILDINC) $(NO_STDERR) || echo RELEASE
+#cmd_RELEASEMODE	= $(GREP) -Eq '^[[:space:]]*\#[[:space:]]*define BUILD_DEBUG([[:space:]]|$$)'
+#				$(BUILDINC) $(NO_STDERR) && echo DEBUG || echo TEST #RELEASE
 tmp_RELEASEMODE	!= $(cmd_RELEASEMODE)
 tmp_RELEASEMODE	?= $(shell $(cmd_RELEASEMODE))
 RELEASE_MODE	:= $(tmp_RELEASEMODE)
@@ -393,7 +398,8 @@ find_AND_NOGEN2	:= $(tmp_FIND_NOGEN2)
 # Other non-generated sources and headers. Extension must be in low-case.
 cmd_SRC		= $(cmd_FINDBSDOBJ); \
 		  $(FIND) $(SRCDIR) \( -name '*.c' -or -name '*.cc' -or -name '*.cpp' -or -name '*.m' -or -name '*.mm' \) \
- 		    $(find_AND_NOGEN) -and \! -path '$(SRCINC)' -and \! -path './$(SRCINC)' \
+ 		    $(find_AND_NOGEN) -and \! -path '$(SRCINC_Z)' -and \! -path './$(SRCINC_Z)' \
+		                      -and \! -path '$(SRCINC_STR)' -and \! -path './$(SRCINC_STR)' \
 		    $(find_AND_SYSDEP) -print $(NO_STDERR) | $(SED) -e 's|^\./||'
 cmd_INCLUDES	= $(cmd_FINDBSDOBJ); \
 		  $(FIND) $(INCDIRS) $(SRCDIR) \( -name '*.h' -or -name '*.hh' -or -name '*.hpp' \) \
@@ -402,6 +408,30 @@ cmd_INCLUDES	= $(cmd_FINDBSDOBJ); \
 		    -and \! \( -path $(FLEXLEXER_LNK) -and -type l \) \
 		    -and \! -path $(BUILDINC) -and \! -path ./$(BUILDINC) $(find_AND_SYSDEP) \
 		    -print $(NO_STDERR) | $(SED) -e 's|^\./||'
+
+# INCLUDE VARIABLE, filled from the 'find' command (cmd_INCLUDES) defined above.
+tmp_INCLUDES	!= $(cmd_INCLUDES)
+tmp_INCLUDES	?= $(shell $(cmd_INCLUDES))
+tmp_INCLUDES	:= $(tmp_INCLUDES)
+INCLUDES	:= $(VERSIONINC) $(BUILDINC) $(tmp_INCLUDES)
+
+# SRCINC containing source code is included if APP_INCLUDE_SOURCE is defined in VERSIONINC.
+# SRCINC_Z (compressed) is used if zlib.h,vlib,gzip,od are present, otherwise SRCINC_STR is used.
+cmd_HAVEVLIB	= case " $(INCLUDES) " in *"include/vlib/avltree.h "*) true ;; *) false ;; esac
+cmd_HAVEZLIBH	= for d in /usr/include /usr/include/zlib /usr/local/include /usr/local/include/zlib \
+		           /opt/local/include /opt/local/include/zlib; do \
+	 	    $(TEST) -e "$$d/zlib.h" && break; done
+cmd_SRCINC	= $(cmd_FINDBSDOBJ); ! $(TEST) -e $(VERSIONINC) \
+		  || { $(GREP) -Eq '^[[:space:]]*\#[[:space:]]*define APP_INCLUDE_SOURCE([[:space:]]|$$)' \
+	                                $(VERSIONINC) $(NO_STDERR) \
+		       && $(cmd_HAVEVLIB) && $(cmd_HAVEZLIBH) \
+		       && $(TEST) -x "`$(WHICH) \"$(OD)\" | $(HEADN1) $(NO_STDERR)`" \
+		               -a -x "`$(WHICH) \"$(GZIP)\" | $(HEADN1) $(NO_STDERR)`" \
+		       && echo $(SRCINC_Z) | $(SED) -e 's|^\./||' \
+		       || echo $(SRCINC_STR) | $(SED) -e 's|^\./||'; } || true
+tmp_SRCINC	!= $(cmd_SRCINC)
+tmp_SRCINC	?= $(shell $(cmd_SRCINC))
+SRCINC		:= $(tmp_SRCINC)
 
 # SRC variable, filled from the 'find' command (cmd_SRC) defined above.
 tmp_SRC		!= $(cmd_SRC)
@@ -426,12 +456,6 @@ cmd_SRC_BUILD	:= echo " $(OBJ_NOJAVA)" | $(SED) -e 's| $(SRCDIR)/| $(BUILDDIR)/|
 tmp_SRC_BUILD	!= $(cmd_SRC_BUILD)
 tmp_SRC_BUILD	?= $(shell $(cmd_SRC_BUILD))
 OBJ		:= $(tmp_SRC_BUILD)
-
-# INCLUDE VARIABLE, filled from the 'find' command (cmd_INCLUDES) defined above.
-tmp_INCLUDES	!= $(cmd_INCLUDES)
-tmp_INCLUDES	?= $(shell $(cmd_INCLUDES))
-tmp_INCLUDES	:= $(tmp_INCLUDES)
-INCLUDES	:= $(VERSIONINC) $(BUILDINC) $(tmp_INCLUDES)
 
 # Search compilers: choice might depend on what we have to build (eg: use gcc if using gcj)
 cmd_CC		= case " $(OBJ) " in *" $(JAVAOBJ) "*) gccgcj=$$(echo "$(GCJ) gcc" | sed -e 's|gcj\([^/ ]*\)|gcc\1|');; esac; \
@@ -476,7 +500,7 @@ sys_WARN	= $(WARN_$(SYSDEP_SUF))
 sys_DEBUG	= $(DEBUG_$(SYSDEP_SUF))
 
 ############################################################################################
-# Generic Build Flags, taking care of system specific flags (sys_*)
+# Generic Build Flags
 cmd_CPPFLAGS	= srcpref=; srcdirs=; $(cmd_TESTBSDOBJ) && srcpref="$(.CURDIR:Q)/" && srcdirs="$$srcpref $${srcpref}$(SRCDIR)"; \
 		  sep=; incpref=; incs=; for dir in . $(SRCDIR) $(BUILDDIR) $${srcdirs} : $(INCDIRS); do \
                       test -z "$$sep" -a -n "$$incs" && sep=" " || true; \
@@ -486,7 +510,7 @@ cmd_CPPFLAGS	= srcpref=; srcdirs=; $(cmd_TESTBSDOBJ) && srcpref="$(.CURDIR:Q)/" 
 tmp_CPPFLAGS	!= $(cmd_CPPFLAGS)
 tmp_CPPFLAGS	?= $(shell $(cmd_CPPFLAGS))
 tmp_CPPFLAGS	:= $(tmp_CPPFLAGS)
-CPPFLAGS	:= $(tmp_CPPFLAGS) $(sys_INCS) $(INCS) $(MACROS) -DHAVE_VERSION_H
+CPPFLAGS	:= $(tmp_CPPFLAGS) $(INCS) $(MACROS) -DHAVE_VERSION_H
 FLAGS_COMMON	= $(OPTI) $(WARN) $(ARCH)
 CFLAGS		= -MMD $(FLAGS_C) $(FLAGS_COMMON)
 CXXFLAGS	= -MMD $(FLAGS_CXX) $(FLAGS_COMMON)
@@ -495,7 +519,7 @@ OBJCXXFLAGS	= -MMD $(FLAGS_OBJCXX) $(FLAGS_COMMON)
 JFLAGS		= $(FLAGS_GCJ) $(FLAGS_COMMON) -I$(BUILDDIR)
 JHFLAGS		= -I$(BUILDDIR)
 LIBFORGCJ$(GCJ)	= -lstdc++
-LDFLAGS		= $(ARCH) $(OPTI) $(LIBS) $(sys_LIBS) $(LIBFORGCJ$(CCLD))
+LDFLAGS		= $(ARCH) $(OPTI) $(LIBS) $(LIBFORGCJ$(CCLD))
 ARFLAGS		= r
 LFLAGS		=
 LCXXFLAGS	= $(LFLAGS)
@@ -547,6 +571,7 @@ ALLMAKEFILES	= Makefile
 LICENSE		= LICENSE
 README		= README.md
 CLANGCOMPLETE	= .clang_complete
+VALGRINDSUPP	= .valgrind.supp
 SRCINC_CONTENT	= $(LICENSE) $(README) $(METASRC) $(tmp_SRC) $(tmp_JAVASRC) $(INCLUDES) $(ALLMAKEFILES)
 
 ############################################################################################
@@ -558,6 +583,7 @@ CLEANDIRS	= $(SUBDIRS:=-clean)
 TESTDIRS	= $(SUBDIRS:=-test)
 DEBUGDIRS	= $(SUBDIRS:=-debug)
 DOCDIRS		= $(SUBDIRS:=-doc)
+TESTBUILDDIRS	= $(SUBDIRS:=-test-build)
 
 # RECURSEMAKEARGS, see doc for SUBMODROOTDIR above. When SUBMODROOTDIR is not empty,
 # if the submodule is fetched alone, it will use its own submodules, if it is fetched as a
@@ -586,7 +612,8 @@ $(BUILDDIRS): .EXEC
 # --- clean : remove objects and generated files
 clean: cleanme $(CLEANDIRS)
 cleanme:
-	$(RM) $(OBJ:.class=*.class) $(SRCINC) $(GENSRC) $(GENINC) $(GENJAVA) $(CLASSES:.class=*.class) $(DEPS) $(INCLUDEDEPS)
+	$(RM) $(SRCINC_Z:.c=.*) $(SRCINC_STR:.c=.*) \
+	      $(OBJ:.class=*.class) $(GENSRC) $(GENINC) $(GENJAVA) $(CLASSES:.class=*.class) $(DEPS) $(INCLUDEDEPS)
 	@$(TEST) -L "$(FLEXLEXER_LNK)" && { cmd="$(RM) $(FLEXLEXER_LNK)"; echo "$$cmd"; $$cmd ; } || true
 $(CLEANDIRS):
 	@recdir=$(@:-clean=); rectarget=clean; $(RECURSEMAKEARGS); cd "$${recdir}" && "$(MAKE)" $${recargs} clean
@@ -599,19 +626,38 @@ distclean: cleanme $(DISTCLEANDIRS)
 	@$(cmd_TESTBSDOBJ) && { del=; for f in $(BIN) $(LIB) $(JAR); do $(TEST) -n "$$f" && del="$$del $(.CURDIR)/$$f"; done; \
 		                for f in $(VERSIONINC) $(README) $(LICENSE); do del="$$del $(.OBJDIR)/$$f"; done; echo "$(RM) $$del"; $(RM) $$del $(NO_STDERR); } || true
 	@$(TEST) "$(BUILDDIR)" != "$(SRCDIR)" && $(RMDIR) `$(FIND) $(BUILDDIR) -type d | $(SORT) -r` $(NO_STDERR) || true
-	@$(PRINTF) "$(NAME): distclean done, debug disabled.\n"
+	@$(PRINTF) "$(NAME): distclean done, debug & test disabled.\n"
 $(DISTCLEANDIRS):
 	@recdir=$(@:-distclean=); rectarget=distclean; $(RECURSEMAKEARGS); cd "$${recdir}" && "$(MAKE)" $${recargs} distclean
 
 # --- debug : set DEBUG flag in build.h and rebuild
 debug: update-$(BUILDINC) $(DEBUGDIRS)
-	@{ $(GREP) -Ev '^[[:space:]]*\#[[:space:]]*define[[:space:]]+(BUILD_DEBUG|BUILD_TEST)([[:space:]]|$$)' $(BUILDINC) $(NO_STDERR); \
-		$(PRINTF) "#define BUILD_DEBUG\n#define BUILD_TEST\n"; } > $(BUILDINC).tmp && $(MV) $(BUILDINC).tmp $(BUILDINC)
-	@$(PRINTF) "$(NAME): debug enabled ('make distclean' to disable it).\n"
-	@$(cmd_TESTBSDOBJ) && cd "$(.CURDIR)" || true; \
-	 $(TEST) -n "$(SUBMODROOTDIR)" && "$(MAKE)" SUBMODROOTDIR="$(SUBMODROOTDIR)" || "$(MAKE)"
+#	@{ $(GREP) -Ev '^[[:space:]]*\#[[:space:]]*define[[:space:]]+(BUILD_DEBUG|BUILD_TEST)([[:space:]]|$$)' $(BUILDINC) $(NO_STDERR);
+#		$(PRINTF) "#define BUILD_DEBUG\n#define BUILD_TEST\n"; } > $(BUILDINC).tmp && $(MV) $(BUILDINC).tmp $(BUILDINC)
+	@if $(TEST) "$(RELEASE_MODE)" '!=' "DEBUG"; then \
+	     { $(SED) -e 's/^\([[:space:]]*\#[[:space:]]*define[[:space:]][[:space:]]*BUILD_APPRELEASE[[:space:]]\).*/\1 "DEBUG"/' \
+	          $(BUILDINC) $(NO_STDERR); } > $(BUILDINC).tmp && $(MV) $(BUILDINC).tmp $(BUILDINC) || true; \
+	     $(PRINTF) "$(NAME): debug enabled ('make distclean' to disable it).\n"; \
+	 fi
+	 @$(cmd_TESTBSDOBJ) && cd "$(.CURDIR)" || true; \
+	  if $(TEST) -n "$(SUBMODROOTDIR)"; then "$(MAKE)" SUBMODROOTDIR="$(SUBMODROOTDIR)"; else "$(MAKE)"; fi
 $(DEBUGDIRS):
 	@recdir=$(@:-debug=); rectarget=debug; $(RECURSEMAKEARGS); cd "$${recdir}" && "$(MAKE)" $${recargs} debug
+
+# --- test-build : set TEST release in build.h and rebuild
+test-build: update-$(BUILDINC) $(TESTBUILDDIRS)
+#	@{ $(GREP) -Ev '^[[:space:]]*\#[[:space:]]*define[[:space:]]+(BUILD_DEBUG|BUILD_TEST)([[:space:]]|$$)' $(BUILDINC) $(NO_STDERR);
+#		$(PRINTF) "#define BUILD_DEBUG\n#define BUILD_TEST\n"; } > $(BUILDINC).tmp && $(MV) $(BUILDINC).tmp $(BUILDINC)
+	@if $(TEST) "$(RELEASE_MODE)" = "RELEASE"; then \
+	     { $(SED) -e 's/^\([[:space:]]*\#[[:space:]]*define[[:space:]][[:space:]]*BUILD_APPRELEASE[[:space:]]\).*/\1 "TEST"/' \
+	          $(BUILDINC) $(NO_STDERR); } > $(BUILDINC).tmp && $(MV) $(BUILDINC).tmp $(BUILDINC) \
+	     && $(PRINTF) "$(NAME): test enabled ('make distclean' to disable it).\n"; \
+	 fi
+	@$(cmd_TESTBSDOBJ) && cd "$(.CURDIR)" || true; \
+	 if $(TEST) -n "$(SUBMODROOTDIR)"; then "$(MAKE)" SUBMODROOTDIR="$(SUBMODROOTDIR)"; else "$(MAKE)"; fi
+$(TESTBUILDDIRS):
+	@recdir=$(@:-test-build=); rectarget=test-build; $(RECURSEMAKEARGS); cd "$${recdir}" && "$(MAKE)" $${recargs} test-build
+
 # Code to disable debug without deleting BUILDINC:
 # @$(GREP) -Ev '^[[:space:]]*\#[[:space:]]*define[[:space:]]+(BUILD_DEBUG|BUILD_TEST)([[:space:]]|$$)' $(BUILDINC) \
 #	    > $(BUILDINC).tmp && $(MV) $(BUILDINC).tmp $(BUILDINC)
@@ -650,14 +696,18 @@ test: all $(TESTDIRS)
 $(TESTDIRS): all
 	@recdir=$(@:-test=); rectarget=test; $(RECURSEMAKEARGS); cd "$${recdir}" && "$(MAKE)" $${recargs} test
 
-# --- build bin&lib ---
+# --- build BIN ---
 $(BIN): $(OBJ) $(SUBLIBS) $(JCNIINC)
 	@if $(cmd_TESTBSDOBJ); then ln -sf "$(.OBJDIR)/`basename $@`" "$(.CURDIR)"; else $(TEST) -L $@ && $(RM) $@ || true; fi
 	$(CCLD) $(OBJ:.class=*.class) $(LDFLAGS) -o $@
 	@$(PRINTF) "$@: build done.\n"
 
+# --- build LIB ---
 $(LIB): $(OBJ) $(SUBLIBS) $(JCNIINC)
 	@if $(cmd_TESTBSDOBJ); then ln -sf "$(.OBJDIR)/`basename $@`" "$(.CURDIR)"; else $(TEST) -L $@ && $(RM) $@ || true; fi
+	@# Workaround for issue on osx 10.11 where object names are changed when replaced,
+	@# which disturbs dsymutil. This allows also to remove objects that are not part anymore of lib.
+	@$(RM) $@
 	$(AR) $(ARFLAGS) $@ $(OBJ:.class=*.class)
 	$(RANLIB) $@
 	@$(PRINTF) "$@: build done.\n"
@@ -847,7 +897,7 @@ dist:
 	 && $(RM) -R "$(DISTDIR)/$${distname}" \
 	 && $(PRINTF) "$(NAME): archives created: $$(ls $(DISTDIR)/$${distname}.* | $(TR) '\n' ' ')\n"
 
-$(SRCINC): $(SRCINC_CONTENT)
+$(SRCINC_STR): $(SRCINC_CONTENT)
 	@# Generate $(SRCINC) containing all sources.
 	@$(PRINTF) "$(NAME): generate $@\n"
 	@$(MKDIR) -p $(@D)
@@ -855,8 +905,9 @@ $(SRCINC): $(SRCINC_CONTENT)
 	 $(PRINTF) "/* generated content */\n" > $@ ; \
 		$(AWK) 'BEGIN { dbl_bkslash="\\"; gsub(/\\/, "\\\\\\", dbl_bkslash); o="awk on ubuntu 12.04"; \
 	                        if (dbl_bkslash=="\\\\") dbl_bkslash="\\\\\\"; else dbl_bkslash="\\\\"; \
-				print "#include <stdlib.h>\n#include \"$(VERSIONINC)\"\n#ifdef APP_INCLUDE_SOURCE\n" \
-				      "static const char * const s_program_source[] = {"; } \
+				print "#include <stdlib.h>\n#include <stdio.h>\n" \
+		                      "#include \"$(VERSIONINC)\"\n#ifdef APP_INCLUDE_SOURCE\n" \
+				      "static const char * const s_program_source[] = { (const char *) 0x0abcCafeUL,"; } \
 		   function printblk() { \
 	               gsub(/\\/, dbl_bkslash, blk); \
                        gsub(/"/, "\\\"", blk); \
@@ -864,20 +915,57 @@ $(SRCINC): $(SRCINC_CONTENT)
 	               print "\"" blk "\\n\","; \
 	           } { \
 		       if (curfile != FILENAME) { \
-		           curfile="/* FILE: $(NAME)/" FILENAME " */"; blk=blk "\n" curfile; curfile=FILENAME; \
+		           curfile="/* #@@# FILE #@@# $(NAME)/" FILENAME " */"; blk=blk "\n" curfile; curfile=FILENAME; \
 	               } if (length($$0 " " blk) > 500) { \
 	                   printblk(); blk=$$0; \
                        } else \
 		           blk=blk "\n" $$0; \
 		   } END { \
-		       printblk(); print "NULL };\nconst char *const* $(NAME)_get_source() { return s_program_source; }\n#endif"; \
-		   }' $$input >> $@ ; \
-	     $(CC) -I. -c $@ -o $(@).tmp.o $(NO_STDERR) \
-	         || $(PRINTF) "%s\n" "#include <stdlib.h>" "#include \"$(VERSIONINC)\"" "#ifdef APP_INCLUDE_SOURCE" \
-	                             "static const char * const s_program_source[] = {" \
-				     "  \"cannot include source. check awk version or antivirus or bug\\n\", NULL};" \
-				     "const char *const* $(NAME)_get_source() { return s_program_source; }" "#endif" > $@; \
-	     $(RM) -f $(@).*
+		       printblk(); print "NULL };\n" \
+	           }' $$input >> $@; \
+	     print_getsrc_fun() { \
+	         $(PRINTF) "%s\n" \
+	            '# ifndef BUILD_VLIB' '#  define BUILD_VLIB 0' ' #endif' '# if BUILD_VLIB' '#  include "vlib/util.h"' '# endif' \
+	            'int $(NAME)_get_source(FILE * out, char * buffer, unsigned int buffer_size, void ** ctx) {' \
+	            '# if defined(BUILD_VLIB) && BUILD_VLIB' \
+	            '    return vdecode_buffer(out, buffer, buffer_size, ctx, (const char *)s_program_source, sizeof(s_program_source));' \
+	            '# else' \
+	            '    (void) buffer; (void) buffer_size; (void) ctx; const char *const* src;' \
+	            '    if (out) for (src = s_program_source + 1; *src; src++) fprintf(out, "%s", *src); return 0;' \
+	            '# endif' \
+	            '}' '#endif' >> $@; \
+	     }; print_getsrc_fun; \
+	     $(CC) -fsyntax-only $(CPPFLAGS) $(FLAGS_C) $(NO_STDERR) $@ \
+	         || { $(PRINTF) "%s\n" '#include <stdlib.h>' '#include <stdio.h>' '#include "$(VERSIONINC)"' '#ifdef APP_INCLUDE_SOURCE' \
+	                             'static const char * const s_program_source[] = { (const char *) 0xabcCafeUL,' \
+				     '    "cannot include source. check awk version or antivirus or bug\n", NULL' \
+				     '};' > $@; print_getsrc_fun; }
+
+$(SRCINC_Z): $(SRCINC_CONTENT)
+	@# Generate $(SRCINC) containing all sources.
+	@$(PRINTF) "$(NAME): generate $@\n"
+	@$(MKDIR) -p $(@D)
+	@$(cmd_TESTBSDOBJ) && input="$>" || input="$(SRCINC_CONTENT)"; \
+	 $(PRINTF) "%s\n" "/* generated content */" \
+	                  "#include <stdlib.h>" \
+	                  "#include <stdio.h>" \
+	                  "#include <zlib.h>" \
+	                  "#include <vlib/util.h>" \
+	                  "#include \"$(VERSIONINC)\"" \
+	                  "#ifdef APP_INCLUDE_SOURCE" \
+	                  "static const unsigned char s_program_source[] = {" \
+	    > $@ ; \
+	 dumpsrc() { for f in $$input; do \
+	     $(PRINTF) "\n/* #@@# FILE #@@# $(NAME)/$$f */\n"; \
+	     cat $$f; \
+	     done; }; dumpsrc | $(GZIP) -c | $(OD) -An -tuC | $(SED) -e 's/[[:space:]][[:space:]]*0*\([0-9][0-9]*\)/\1,/g' >> $@; \
+	 sha=`$(WHICH) shasum sha256 sha256sum $(NO_STDERR) | $(HEADN1)`; case "$$sha" in */shasum) sha="$$sha -a256";; esac; \
+	 $(PRINTF) "%s\n" "};" "static const char * s_program_hash = \"`dumpsrc | $$sha | $(AWK) '{ print $$1; }'`\";" \
+	     "int $(NAME)_get_source(FILE * out, char * buffer, unsigned int buffer_size, void ** ctx) {" \
+	     "    (void) s_program_hash;" \
+	     "    return vdecode_buffer(out, buffer, buffer_size, ctx, (const char *) s_program_source, sizeof(s_program_source));" \
+	     "} /* ##ZSRC_END */" \
+	     "#endif" >> $@
 
 $(LICENSE):
 	@$(cmd_TESTBSDOBJ) && $(TEST) -e "$(.CURDIR)/$@" || echo "$(NAME): create $@"
@@ -914,8 +1002,10 @@ create-$(BUILDINC): $(VERSIONINC) $(ALLMAKEFILES) .EXEC
 	       "#define BUILD_MAKE \"\"" "#define BUILD_CC_CMD \"\"" "#define BUILD_CXX_CMD \"\"" "#define BUILD_OBJC_CMD \"\"" \
 	       "#define BUILD_GCJ_CMD \"\"" "#define BUILD_CCLD_CMD \"\"" "#define BUILD_SRCPATH \"\"" \
 	       "#define BUILD_JAVAOBJ 0" "#define BUILD_JAR 0" "#define BUILD_BIN 0" "#define BUILD_LIB 0" \
-	       "#define BUILD_YACC 0" "#define BUILD_LEX 0" "#define BUILD_BISON3 0" "#define BUILD_CURSES 1" \
-	       "#ifdef __cplusplus" "extern \"C\" {" "#endif" "const char *const* $(NAME)_get_source();" "#ifdef __cplusplus" "}" "#endif" >> $(BUILDINC); \
+	       "#define BUILD_YACC 0" "#define BUILD_LEX 0" "#define BUILD_BISON3 0" \
+	       "#define BUILD_VLIB 0" "#define BUILD_ZLIB 0" "#define BUILD_ZLIB_H 0" "#define BUILD_CURSES 1" \
+	       "#include <stdio.h>" "#ifdef __cplusplus" "extern \"C\" {" "#endif" \
+	       "int $(NAME)_get_source(FILE * out, char * buffer, unsigned int buffer_size, void ** ctx);" "#ifdef __cplusplus" "}" "#endif" >> $(BUILDINC); \
 	 fi;
 #fullgitrev=`$(GIT) describe --match "v[0-9]*" --always --tags --dirty --abbrev=0 $(NO_STDERR)`
 update-$(BUILDINC): create-build.h .EXEC
@@ -935,6 +1025,8 @@ update-$(BUILDINC): create-build.h .EXEC
 	 $(TEST) -n "$(LEX)" && lex=1 || lex=0; \
 	 $(TEST) -n "$(BISON3)" && bison3=1 || bison3=0; \
 	 $(TEST) -n "$(SRCINC)" && appsource=true || appsource=false; \
+	 $(cmd_HAVEVLIB) && vlib=1 || vlib=0; \
+	 zlib=0; zlib_h=0; $(cmd_HAVEZLIBH) && zlib_h=1 && zlib=1; \
 	 if $(SED) -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_GITREV[[:space:]]\).*|\1$${gitrev}|" \
 	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_GITREVFULL[[:space:]]\).*|\1$${fullgitrev}|" \
 	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_GITREMOTE[[:space:]]\).*|\1$${gitremote}|" \
@@ -957,6 +1049,9 @@ update-$(BUILDINC): create-build.h .EXEC
 	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_YACC[[:space:]]\).*|\1$${yacc}|" \
 	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_LEX[[:space:]]\).*|\1$${lex}|" \
 	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_BISON3[[:space:]]\).*|\1$${bison3}|" \
+	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_VLIB[[:space:]]\).*|\1$${vlib}|" \
+	        -e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_ZLIB[[:space:]]\).*|\1$${zlib}|" \
+		-e "s|^\([[:space:]]*#define[[:space:]][[:space:]]*BUILD_ZLIB_H[[:space:]]\).*|\1$${zlib_h}|" \
 	        $(BUILDINC) > $(BUILDINC).tmp \
 	 ; then \
 	    if $(DIFF) -q $(BUILDINC) $(BUILDINC).tmp $(NO_STDOUT); then $(RM) $(BUILDINC).tmp; \
@@ -981,7 +1076,7 @@ update-$(BUILDINC): create-build.h .EXEC
 .gitignore:
 	@$(cmd_TESTBSDOBJ) && cd $(.CURDIR) && build=`echo $(.OBJDIR) | $(SED) -e 's|^$(.CURDIR)||'`/ || build=; \
 	 { cat .gitignore $(NO_STDERR); \
-	   for f in $(LIB) $(JAR) $(GENSRC) $(GENJAVA) $(GENINC) $(SRCINC) \
+	   for f in $(LIB) $(JAR) $(GENSRC) $(GENJAVA) $(GENINC) $(SRCINC_Z) $(SRCINC_STR) \
 	            $(BUILDINC) $(BUILDINCJAVA) $(CLANGCOMPLETE) obj/ \
 	            `$(TEST) -n "$(BIN)" && echo "$(BIN)" "$(BIN).dSYM" "$(BIN).core" "core" "core.[0-9]*[0-9]" || true` \
 	            `echo "$(FLEXLEXER_LNK)" | $(SED) -e 's|^\./||' || true`; do \
@@ -1021,25 +1116,85 @@ debug-makefile:
 	 sed -e 's/^\(cmd_[[:space:]0-9a-zA-Z_]*\)=/\1= ls $(NAME)\/\1 || time /' Makefile > Makefile.debug \
 	 && "$(MAKE)" -f Makefile.debug
 
+#$(VALGRINDSUPP):
+#	@$(cmd_TESTBSDOBJ) && $(TEST) -e "$(.CURDIR)/$@" || echo "$(NAME): create $@"
+#	@$(TOUCH) "$@"
+#	@if $(cmd_TESTBSDOBJ); then $(TEST) -e "$(.CURDIR)/$@" || mv "$@" "$(.CURDIR)"; ln -sf "$(.CURDIR)/$@" .; fi
 # Run Valgrind filter output
 valgrind: all
+	@$(RM) -R $(BIN).dSYM
 	@logfile=`$(MKTEMP) ./valgrind_XXXXXX` && $(MV) "$${logfile}" "$${logfile}.log"; logfile="$${logfile}.log"; \
-	 $(VALGRIND) --leak-check=full --log-file="$${logfile}" $(VALGRIND_RUN_PROGRAM) || true; \
-	 $(AWK) '/[0-9]+[[:space:]]+bytes[[:space:]]+/ { block=1; blockignore=0; blockstr=$$0; } \
+	 $(TEST) -e "$(VALGRINDSUPP)" && vgsupp="--suppressions=$(VALGRINDSUPP)" || vgsupp=; \
+	 $(VALGRIND) $(VALGRIND_ARGS) $${vgsupp} --log-file="$${logfile}" $(VALGRIND_RUN_PROGRAM) || true; \
+	 if $(TEST) -z "$(VALGRIND_MEM_IGNORE_PATTERN)"; then cat "$${logfile}"; else \
+ 	     $(AWK) '/([0-9]+[[:space:]]+bytes|[cC]onditional jump|uninitialised value)[[:space:]]+/ { if (block == 0) {block=1; blockignore=0;} } \
 	         //{ \
 	             if (block) { \
-	                 blockstr=blockstr "\n" $$0; \
-	                 if (/$(VALGRIND_MEM_IGNORE_PATTERN)/) blockignore=1; \
+			 if (/$(VALGRIND_MEM_IGNORE_PATTERN)/) {blockignore=1;} else {blockstr=blockstr "\n" $$0}; \
 	             } else { print $$0; } \
 	         } \
-	         /=+[0-9]+=+[[:space:]]*$$/ { \
+		 /^[[:space:]]*=+[0-9]+=+[[:space:]]*$$/ { \
 	             if (block) { \
 	                 if (!blockignore) print blockstr; \
+			 blockstr=""; \
 	                 block=0; \
 	             } \
 	         } \
-	         ' $${logfile} > $${logfile%.log}_filtered.log && cat $${logfile%.log}_filtered.log \
-	 && echo "* valgrind output in $${logfile} and $${logfile%.log}_filtered.log (will be deleted by 'make distclean')"
+	         ' $${logfile} > $${logfile%.log}_filtered.log && cat $${logfile%.log}_filtered.log; \
+	 fi && echo "* valgrind output in $${logfile} and $${logfile%.log}_filtered.log (will be deleted by 'make distclean')"
+
+help:
+	@$(PRINTF) "%s\n" \
+	  "make <target>" \
+	  "  target: all, file (main.o, bison.c), ...:" \
+	  "  CC           [$(CC)]" \
+	  "  CXX          [$(CXX)]" \
+	  "  OBJC         [$(OBJC)]" \
+	  "  GCJ          [$(GCJ)]" \
+	  "  MACROS       [$(MACROS)]" \
+	  "  OPTI         [$(OPTI)]" \
+	  "  WARN         [$(WARN)]" \
+	  "  ARCH         [$(ARCH)]" \
+	  "  INCS         [$(INCS)]" \
+	  "  INCDIRS      [$(INCDIRS)]" \
+	  "  LIBS         [$(LIBS)]" \
+	  "  FLAGS_C      [$(FLAGS_C)]" \
+	  "  FLAGS_CXX    [$(FLAGS_CXX)]" \
+	  "  FLAGS_OBJC   [$(FLAGS_OBJC)]" \
+	  "  FLAGS_GCJ    [$(FLAGS_GCJ)]" \
+	  "  ..." \
+	  "" \
+  	  "make info" \
+	  "  display makefile variables" \
+	  "" \
+	  "make debug" \
+	  "  enable debug compile flags and rebuild" \
+	  "" \
+	  "make valgrind" \
+	  "  run valgrind with:" \
+	  "   VALGRIND                    [$(VALGRIND)]" \
+	  "   VALGRIND_ARGS               [$(VALGRIND_ARGS)]" \
+	  "   VALGRIND_RUN_PROGRAM        [$(VALGRIND_RUN_PROGRAM)]" \
+	  "   VALGRIND_MEM_IGNORE_PATTERN [$(VALGRIND_MEM_IGNORE_PATTERN)]" \
+	  "   VALGRINDSUPP                [$(VALGRINDSUPP)]" \
+	  "" \
+	  "make merge-makefile" \
+	  "  merge the common part of Makefile with SUBDIRS:" \
+	  "   SUBDIRS [$(SUBDIRS)]" \
+	  "" \
+	  "make install" \
+	  "  PREFIX         [$(PREFIX)]" \
+	  "  INSTALL_FILES  [$(INSTALL_FILES)]" \
+	  "" \
+	  "make test"; \
+	  $(PRINTF) "  TEST_RUN_PROGRAM  ["'$(TEST_RUN_PROGRAM:S/'/'"'"'/g)$(subst ','"'"',$(TEST_RUN_PROGRAM))]\n'; \
+	$(PRINTF) "%s\n" \
+	  "" \
+	  "make .gitignore" \
+	  "" \
+	  "make dist" \
+	  "  DISTDIR          [ $(DISTDIR) ]" \
+	  ""
 
 info:
 	@$(PRINTF) "%s\n" \
@@ -1101,8 +1256,9 @@ rinfo: info
 .PHONY: subdirs $(CLEANDIRS)
 .PHONY: subdirs $(DISTCLEANDIRS)
 .PHONY: subdirs $(DEBUGDIRS)
+.PHONY: subdirs $(TESTBUILDDIRS)
 .PHONY: subdirs $(DOCDIRS)
 .PHONY: default_rule all build_all cleanme clean distclean dist test info rinfo \
 	doc installme install debug gentags update-$(BUILDINC) create-$(BUILDINC) \
-	.gitignore merge-makefile debug-makefile valgrind
+	.gitignore merge-makefile debug-makefile valgrind help test-build
 
