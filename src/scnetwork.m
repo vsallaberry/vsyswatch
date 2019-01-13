@@ -140,7 +140,7 @@ int main(int argc, const char *const* argv) { @autoreleasepool {
                                         .battery_percents_low = 12,
                                         .battery_time_remaining_low = 15 };
 
-    fprintf(stderr, "%s v%s git#%s (GPL v3 - Copyright (c) 2018 Vincent Sallaberry)\n",
+    fprintf(stderr, "%s v%s git#%s (GPL v3 - Copyright (c) 2018-2019 Vincent Sallaberry)\n",
             BUILD_APPNAME, APP_VERSION, BUILD_GITREV);
     fflush(stderr);
 
