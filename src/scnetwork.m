@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "vlib/options.h"
+#include "vlib/util.h"
 
 #include "version.h"
 #include "vsyswatch.h"
@@ -569,4 +570,13 @@ int vsyswatch_network_test(vsyswatch_ctx_t * ctx) {
     }
     return 0;
 }
+
+#ifndef APP_INCLUDE_SOURCE
+# define APP_NO_SOURCE_STRING "\n/* #@@# FILE #@@# " BUILD_APPNAME "/* */\n" \
+                              BUILD_APPNAME " source not included in this build.\n"
+int vsyswatch_get_source(FILE * out, char * buffer, unsigned int buffer_size, void ** ctx) {
+    return vdecode_buffer(out, buffer, buffer_size, ctx,
+            APP_NO_SOURCE_STRING, sizeof(APP_NO_SOURCE_STRING) - 1);
+}
+#endif
 
