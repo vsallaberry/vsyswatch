@@ -119,16 +119,18 @@ LIBS_darwin	= -framework Foundation -framework IOKit -framework SystemConfigurat
 LIBS_linux	= -lrt
 
 # TESTS and DEBUG parameters
-# VALGRIND_RUN_PROGRAM: how to run the program with valgrind (can be used to pass arguments to valgrind)
+# VALGRIND_RUN: how to run the program with valgrind (can be used to pass arguments to valgrind)
 #   (eg: './$(BIN) arguments', '--trace-children=no ./$(BIN) arguments')
-VALGRIND_RUN_PROGRAM = ./$(BIN)
+VALGRIND_RUN	= ./$(BIN)
 # VALGRIND_MEM_IGNORE_PATTERN: awk regexp to ignore keyworks in LEAKS reports
 VALGRIND_MEM_IGNORE_PATTERN = __CFInitialize|_objc_init|objc_msgSend|_NSInitializePlatform
-# TEST_RUN_PROGRAM: what to run with 'make test' (eg: 'true', './test.sh $(BIN)', './$(BIN) --test'
-TEST_RUN_PROGRAM = if $(TEST) "$(RELEASE_MODE)" = "DEBUG"; then ./$(BIN) -h && ./$(BIN) -d -T; \
-		   else ./$(BIN) -h && ./$(BIN) -d -T && r=true || r=false; \
-		        echo "** make test: run 'make debug && make test' for full tests"; $$r; \
-		   fi
+# CHECK_RUN: what to run with 'make check' (eg: 'true', './test.sh $(BIN)', './$(BIN) --test'
+ #   if tests are only built with macro _TEST, you can insert 'make debug' or 'make test'
+CHECK_RUN	= set -x || true; \
+		  if $(TEST) "$(RELEASE_MODE)" = "DEBUG"; then ./$(BIN) -h && ./$(BIN) -d -T; \
+		  else ./$(BIN) -h && ./$(BIN) -d -T && r=true || r=false; \
+		      echo "** make test: run 'make debug && make test' for full tests"; $$r; \
+		  fi
 ############################################################################################
 # GENERIC PART - in most cases no need to change anything below until end of file
 ############################################################################################
