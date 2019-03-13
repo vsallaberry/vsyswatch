@@ -83,7 +83,7 @@ PREFIX		= /usr/local
 INSTALL_FILES	= $(BIN)
 
 # CONFIG_CHECK = all zlib ncurses libcrypto applecrypto openssl sigqueue sigrtmin
-#                libcrypt crypt.h crypt_gnu crypt_des_ext
+#                libcrypt crypt.h crypt_gnu crypt_des_ext libintl
 # If a feature is prefixed with '+' (eg: +openssl), this makes it MANDATORY
 # and make will fail if the feature is not available
 CONFIG_CHECK  = zlib ncurses
