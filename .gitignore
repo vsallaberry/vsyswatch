@@ -1,3 +1,4 @@
+*.ali
 *.class
 *.d
 *.o
@@ -20,3 +21,4 @@
 /vsyswatch
 /vsyswatch.core
 /vsyswatch.dSYM
+src/_ada-stub_.ad[bs]
